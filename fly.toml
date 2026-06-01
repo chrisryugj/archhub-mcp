@@ -1,0 +1,26 @@
+# fly.toml — 건축HUB MCP
+# 배포: fly launch --no-deploy → fly secrets set ARCHHUB_SERVICE_KEY=... → fly deploy
+
+app = 'archhub-mcp'
+primary_region = 'nrt'
+
+[build]
+  dockerfile = 'Dockerfile'
+
+[env]
+  MCP_TRANSPORT = 'http'
+  HOST = '0.0.0.0'
+  PORT = '8000'
+  # ARCHHUB_SERVICE_KEY 는 'fly secrets set' 으로 주입 (코드/설정에 평문 금지)
+
+[http_service]
+  internal_port = 8000
+  force_https = true
+  auto_stop_machines = 'suspend'
+  auto_start_machines = true
+  min_machines_running = 0
+
+[[vm]]
+  memory = '512mb'   # pandas + 법정동코드 테이블 로드 여유
+  cpu_kind = 'shared'
+  cpus = 1

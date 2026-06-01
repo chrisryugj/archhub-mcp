@@ -1,0 +1,12 @@
+.env
+.env.local
+__pycache__/
+*.pyc
+.git/
+.gitignore
+.venv/
+venv/
+_verify*.py
+README*.md
+CLAUDE.md
+.claude-plugin/

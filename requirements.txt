@@ -1,0 +1,4 @@
+fastmcp>=3.0
+PublicDataReader>=1.1.1
+pandas>=2.0
+requests>=2.31
