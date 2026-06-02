@@ -9,7 +9,7 @@
 > 국가법령정보 MCP가 "법령"을, 통계 MCP가 "통계"를 다루듯, 이건 **건축물 실체 데이터**를 다룬다.
 > 건축물대장 · 건축인허가 · 주택인허가 — data.go.kr 공식 API 실측값만, 출처를 명시하고, 없으면 `[NOT_FOUND]`로 환각을 차단.
 
-remote 커넥터(fly.io)에 **공용 인증키가 탑재**되어 있어, 사용자는 **URL만 등록하면** 키 발급 없이 바로 쓴다.
+remote 커넥터(fly.io)가 떠 있어, 사용자는 **URL만 등록하면** 별도 설정 없이 바로 쓴다.
 
 ---
 
@@ -85,7 +85,7 @@ remote 커넥터(fly.io)에 **공용 인증키가 탑재**되어 있어, 사용�
 [법정동 건축물 통계] 표제부 6057건 기준
 
 ■ 총괄
-  총 6,057동 · 총 연면적 5,283,211㎡ · 평균 3.5층 · 평균 경과 33년
+  총 6,057동 · 총 연면적 5,283,211㎡ · 평균 3.5층 · 평균 경과 32년
 
 ■ 주용도별 (상위 10)
   단독주택          3,543동 (58.5%) · 연면적 841,139㎡
@@ -198,7 +198,7 @@ remote 커넥터(fly.io)에 **공용 인증키가 탑재**되어 있어, 사용�
 
 ## 빠른 시작 (remote 커넥터)
 
-공용키가 서버에 탑재돼 있어 **키 발급이 필요 없다.** URL만 등록하면 된다.
+원격 서버가 떠 있어 **별도 발급·설정 없이** URL만 등록하면 된다.
 
 ### Claude.ai 웹 (설치 없음)
 
@@ -377,17 +377,13 @@ pytest tests/             # 외부 API 비의존(네트워크 mock) · 58 케이
 
 ```bash
 fly launch --no-deploy                              # fly.toml 인식
-fly secrets set ARCHHUB_SERVICE_KEY="<디코딩 키>"   # 공용키 주입 (평문 커밋 금지)
-fly secrets set ARCHHUB_MCP_TOKEN="<랜덤 토큰>"     # 공개 보호: 접근에 Bearer 토큰 요구
-fly secrets set ARCHHUB_DAILY_CALL_CAP=9000         # 공용키 일 한도 보호 (키 한도에 맞춰)
+fly secrets set ARCHHUB_SERVICE_KEY="<디코딩 키>"   # 인증키 주입 (평문 커밋 금지)
+fly secrets set ARCHHUB_DAILY_CALL_CAP=9000         # (선택) 일일 호출 상한 — 초과 시 차단
 fly deploy
+fly scale count 1                                   # streamable-http 세션 일관성 위해 단일 머신
 ```
 
-> **공개 remote 운영 시 `ARCHHUB_MCP_TOKEN`을 반드시 설정**한다. 미설정이면 무인증이라
-> 누구든 공용키를 소모할 수 있다. 설정 시 클라이언트는 `Authorization: Bearer <토큰>`을 보내야 하며,
-> 허가된 사용자에게만 토큰을 공유한다. `ARCHHUB_DAILY_CALL_CAP`은 일일 호출 상한(초과 시 차단)이다.
-
-`auto_stop_machines=suspend` + `min_machines_running=0`로 무요청 시 0대까지 내려가 비용 절감, 요청 오면 자동 기동. `/health`는 버전·키 적재 여부·**인증 활성 여부**·**키 만료 D-day**·오늘/누적 API 호출수·일일 캡을 노출한다.
+`auto_stop_machines=suspend` + `min_machines_running=0`로 무요청 시 비용 절감, 요청 오면 자동 기동. streamable-http는 세션 기반이라 **단일 머신으로 운영**한다(여러 머신이면 세션이 머신 간에 깨진다). `/health`는 버전·키 적재 여부·**만료 D-day**·오늘/누적 호출수·일일 상한을 노출한다.
 
 ---
 
@@ -403,7 +399,7 @@ fly deploy
 
 ## 한계 · 주의
 
-- **공용키 트래픽 한도**: data.go.kr 개발계정은 일 10,000건 공유. 대량 사용 시 BYOK/운영계정 전환 권장. 정확한 잔여량은 API가 제공하지 않아 `/health`의 `api_calls`는 프로세스 단위 근사치.
+- **트래픽 한도**: 단시간 대량 호출은 외부 API 정책상 제한될 수 있다. `/health`의 호출수(`api_calls`·`calls_today`)로 사용량을 관측하고, 필요하면 `ARCHHUB_DAILY_CALL_CAP`으로 일일 상한을 둔다.
 - **위반건축물 조회 불가**: 표제부/기본개요/총괄표제부 어디에도 위반건축물 필드가 없음(실측 확인) → API로 조회 불가.
 - **개인정보 제외**: 소유자(소유정보) 조회는 범위 밖.
 - **동 전체 조회는 무거움**: 큰 동은 수천 건. `old_buildings`/`district_stats`/`demolitions`/`permits_pipeline`는 전체를 받아 다소 느릴 수 있다. 페이지당 100건 고정이라 1만 행까지 순회 수집하며, 초과분은 응답에 절단을 명시한다. `price_history`는 필지(`bun`) 단위라 가볍다.
