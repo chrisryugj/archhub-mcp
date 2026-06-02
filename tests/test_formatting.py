@@ -3,8 +3,8 @@
 import pandas as pd
 
 from archhub.formatting import (
-    _num, _g, _date, _area, _pct, building_card, profile_to_text,
-    district_to_text, df_to_text, SOURCE,
+    _num, _g, _date, _area, _pct, _floor_sort_key, building_card, profile_to_text,
+    district_to_text, floors_to_text, df_to_text, SOURCE,
 )
 import datetime
 
@@ -111,6 +111,38 @@ def test_district_to_text_handles_empty_optional_columns():
     df = pd.DataFrame([{"주용도코드명": "단독주택"}, {"주용도코드명": "단독주택"}])
     out = district_to_text(df, total=2)
     assert "총 2동" in out and "단독주택" in out
+
+
+def test_profile_to_text_shows_zoning():
+    df = pd.DataFrame([{"건물명": "A"}])
+    out = profile_to_text(df, total=1, max_buildings=5, zoning="제2종일반주거지역 · 지구단위계획구역")
+    assert "용도지역·지구: 제2종일반주거지역 · 지구단위계획구역" in out
+    # zoning 없으면 줄 생략
+    assert "용도지역" not in profile_to_text(df, total=1, max_buildings=5)
+
+
+def test_floor_sort_key_orders_top_to_bottom():
+    # 옥탑 > 지상2 > 지상1 > 지하1 > 지하2
+    keys = [
+        _floor_sort_key("옥탑", 1), _floor_sort_key("지상", 2), _floor_sort_key("지상", 1),
+        _floor_sort_key("지하", 1), _floor_sort_key("지하", 2),
+    ]
+    assert keys == sorted(keys, reverse=True)
+
+
+def test_floors_to_text_stacks_sorts_and_merges():
+    df = pd.DataFrame([
+        {"건물명": "테스트빌", "층구분코드명": "지상", "층번호": "1", "주용도코드명": "근린생활시설", "면적": "100"},
+        {"건물명": "테스트빌", "층구분코드명": "지상", "층번호": "1", "주용도코드명": "주차장", "면적": "50"},
+        {"건물명": "테스트빌", "층구분코드명": "지상", "층번호": "2", "주용도코드명": "사무소", "면적": "150"},
+        {"건물명": "테스트빌", "층구분코드명": "지하", "층번호": "1", "주용도코드명": "주차장", "면적": "200"},
+        {"건물명": "테스트빌", "층구분코드명": "옥탑", "층번호": "1", "주용도코드명": "기계실", "면적": "20"},
+    ])
+    out = floors_to_text(df, total=5)
+    order = [ln for ln in out.splitlines() if "㎡" in ln and ("층" in ln or "옥탑" in ln)]
+    assert "옥탑" in order[0] and "2층" in order[1] and "1층" in order[2] and "지하1층" in order[3]
+    assert "근린생활시설 100㎡" in out and "주차장 50㎡" in out  # 같은 층 복수용도 나열
+    assert "■ 층별 구성 — 테스트빌" in out and SOURCE in out
 
 
 def test_df_to_text_empty_and_source():

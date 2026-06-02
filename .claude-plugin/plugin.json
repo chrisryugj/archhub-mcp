@@ -1,7 +1,7 @@
 {
   "name": "archhub",
   "version": "0.1.0",
-  "description": "국토교통부 건축HUB → MCP. 건축물대장·건축인허가·주택인허가 + 법정동코드 + 한 필지 종합카드 + 동 단위 통계 + 노후건축물 분석. 공용키 탑재 remote 커넥터(URL만 등록)",
+  "description": "국토교통부 건축HUB → MCP. 건축물대장·건축인허가·주택인허가 + 법정동코드 + 용도지역 포함 종합카드 + 층별 구성 + 동 단위 통계 + 노후건축물 분석. 공용키 탑재 remote 커넥터(URL만 등록)",
   "author": {
     "name": "Chris",
     "email": "ryuseungin@naver.com",

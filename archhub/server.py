@@ -15,7 +15,7 @@ from starlette.responses import JSONResponse
 from . import __version__
 from .client import ArchHubClient, KINDS, LEDGER_TYPES, PERMIT_TYPES, HOUSING_TYPES
 from .errors import not_found, format_error
-from .formatting import df_to_text, profile_to_text, district_to_text, _date
+from .formatting import df_to_text, profile_to_text, district_to_text, floors_to_text, _date
 
 SERVICE_KEY = os.environ.get("ARCHHUB_SERVICE_KEY", "").strip()
 KEY_EXPIRES = os.environ.get("ARCHHUB_KEY_EXPIRES", "").strip()  # 공용키 만료일 YYYY-MM-DD(선택)
@@ -31,6 +31,25 @@ def _key_expiry_days():
     except ValueError:
         return None
     return (exp - datetime.date.today()).days
+
+
+def _fetch_zoning(sigungu_code: str, bdong_code: str, bun: str, ji: str):
+    """필지의 용도지역·지구·구역(대표) 요약. 실패/없으면 None (profile 부가정보라 조용히 생략)."""
+    try:
+        df, _ = client.query("ledger", "지역지구구역", sigungu_code, bdong_code,
+                             bun=bun, ji=ji, num_rows=20)
+    except Exception:
+        return None
+    if len(df) == 0 or "지역지구구역코드명" not in df.columns:
+        return None
+    src = df
+    if "대표여부" in df.columns:
+        rep = df[df["대표여부"].astype(str).str.strip() == "1"]
+        if len(rep):
+            src = rep
+    names = list(dict.fromkeys(src["지역지구구역코드명"].astype(str).str.strip()))
+    names = [n for n in names if n and n.lower() != "nan"]
+    return " · ".join(names) or None
 
 mcp = FastMCP(
     name="archhub",
@@ -171,12 +190,13 @@ def building_profile(
     ji: str = "",
     max_buildings: int = 5,
 ) -> str:
-    """한 필지(번지)의 건축물 핵심 스펙을 종합 카드로 한 번에 조회한다.
+    """한 필지(번지)의 건축물 핵심 스펙 + 용도지역을 종합 카드로 한 번에 조회한다.
 
-    표제부를 1회 호출해 동(棟)별로 주용도·구조·규모(층수/높이/연면적/대지면적)·
-    건폐율·용적률(미기재 시 면적으로 계산)·세대/호수·주차·사용승인일·내진·에너지효율을
-    카드 형식으로 묶어준다. type_name을 바꿔 여러 번 호출할 필요 없이, 건물 한 채의
-    전반을 파악할 때 가장 먼저 쓰는 도구다. (중개·감정평가·건축 실무용)
+    표제부와 지역지구구역을 호출해 ① 용도지역·지구(법적 규제) ② 동별 주용도·구조·
+    규모(층수/높이/연면적/대지면적) ③ 건폐율·용적률(미기재 시 면적으로 계산) ④ 세대/호수·
+    주차·사용승인일·내진·에너지효율을 카드로 묶어준다. type_name을 바꿔 여러 번 호출할
+    필요 없이 건물 한 채의 전반과 대지 규제를 함께 파악하는, 가장 먼저 쓰는 도구다.
+    (건축사·시공·중개·감정평가 실무용. 규모검토·대지분석의 출발점)
 
     Args:
         sigungu_code: 시군구 5자리 코드 (find_region으로 조회).
@@ -202,7 +222,8 @@ def building_profile(
             f"건축물대장 표제부 없음 (sigungu={sigungu_code}, bdong={bdong_code}, bun={bun}, ji={ji})",
             ["find_region으로 코드 재확인", "ji(부번) 조정", "건축물대장이 없는 필지일 수 있음"],
         )
-    return profile_to_text(df, total, max_buildings)
+    zoning = _fetch_zoning(sigungu_code, bdong_code, bun, ji)
+    return profile_to_text(df, total, max_buildings, zoning=zoning)
 
 
 @mcp.tool
@@ -292,6 +313,47 @@ def district_stats(
     return district_to_text(df, total, trunc, min_age_years, top_uses)
 
 
+@mcp.tool
+def building_floors(
+    sigungu_code: str,
+    bdong_code: str,
+    bun: str,
+    ji: str = "",
+    max_floors: int = 60,
+) -> str:
+    """한 필지 건물의 층별 구성(각 층 용도·면적)을 스택으로 조회한다.
+
+    건축물대장 층별개요를 호출해 옥탑→지상→지하 순으로 각 층의 주용도와 면적을 쌓아
+    보여준다. 한 층에 여러 용도가 있으면 면적을 합산해 나열한다. "각 층에 뭐가 있나"가
+    필요한 리모델링·용도변경·임대구성·피난/소방 검토에 쓴다. (건축사·시공·중개)
+
+    Args:
+        sigungu_code: 시군구 5자리 코드 (find_region으로 조회).
+        bdong_code: 읍면동 5자리 코드.
+        bun: 번지 본번. **필수** (필지 단위 조회).
+        ji: 번지 부번(생략 가능).
+        max_floors: 표시할 최대 층 수.
+    """
+    if not str(bun).strip():
+        return not_found(
+            "building_floors는 번지(bun)가 필요합니다.",
+            ["find_region으로 코드 확인 후 bun(본번) 지정"],
+        )
+    try:
+        df, total = client.query(
+            "ledger", "층별개요", sigungu_code, bdong_code,
+            bun=bun, ji=ji, num_rows=100,
+        )
+    except Exception as e:
+        return format_error(e, "building_floors")
+    if len(df) == 0:
+        return not_found(
+            f"층별개요 없음 (sigungu={sigungu_code}, bdong={bdong_code}, bun={bun}, ji={ji})",
+            ["find_region으로 코드 재확인", "ji(부번) 조정", "building_profile로 동 단위 먼저 확인"],
+        )
+    return floors_to_text(df, total, max_floors)
+
+
 # ---- HTTP 라우트 ----
 
 
@@ -318,7 +380,7 @@ async def root(request):
         "version": __version__,
         "transport": "streamable-http",
         "endpoint": "/mcp",
-        "tools": ["find_region", "building_profile", "building_ledger",
+        "tools": ["find_region", "building_profile", "building_floors", "building_ledger",
                   "building_permit", "housing_permit", "old_buildings", "district_stats"],
         "source": "국토교통부 건축HUB (data.go.kr)",
     })

@@ -132,13 +132,18 @@ def building_card(row: pd.Series) -> str:
     return "\n".join(lines)
 
 
-def profile_to_text(df: pd.DataFrame, total: int, max_buildings: int, note: str = "") -> str:
-    """필지의 표제부 행(동)들을 종합카드 묶음으로."""
+def profile_to_text(
+    df: pd.DataFrame, total: int, max_buildings: int,
+    note: str = "", zoning: Optional[str] = None,
+) -> str:
+    """필지의 표제부 행(동)들을 종합카드 묶음으로. zoning은 용도지역(법적 규제)."""
     shown = df.head(max_buildings)
     header = f"건축물 {total}개 동"
     if total > max_buildings:
         header += f" 중 {max_buildings}개 표시 (max_buildings로 조정)"
     parts = [header]
+    if zoning:
+        parts.append(f"용도지역·지구: {zoning}")  # 건축 규제의 출발점
     if note:
         parts.append(note)
     parts.append("")
@@ -223,6 +228,52 @@ def district_to_text(
     lines.append("")
     lines.append(SOURCE)
     return "\n".join(lines)
+
+
+def _floor_sort_key(gubun: str, num: int) -> int:
+    """층을 위→아래 순으로 정렬할 키. 옥탑 > 지상N > … > 지상1 > 지하1 > … 지하N."""
+    if gubun == "옥탑":
+        return 100000 + num
+    if gubun == "지하":
+        return -num
+    return num
+
+
+def floors_to_text(df: pd.DataFrame, total: int, max_floors: int = 60) -> str:
+    """층별개요를 층 스택(위→아래)으로. 한 층 여러 용도면 면적 합산해 나열."""
+    d = df.copy()
+    d["_area"] = pd.to_numeric(
+        d.get("면적", pd.Series(dtype="object")).astype(str).str.replace(",", "").str.strip(),
+        errors="coerce",
+    ).fillna(0.0)
+    d["_num"] = pd.to_numeric(d.get("층번호", pd.Series(dtype="object")), errors="coerce").fillna(0).astype(int)
+    d["_gubun"] = d.get("층구분코드명", pd.Series(dtype="object")).astype(str).str.strip()
+
+    floors = []
+    for (gubun, num), grp in d.groupby(["_gubun", "_num"]):
+        uses = grp.groupby(grp["주용도코드명"].astype(str).str.strip())["_area"].sum()
+        uses = uses[uses.index != ""].sort_values(ascending=False)
+        area_sum = float(grp["_area"].sum())
+        label = f"지하{num}층" if gubun == "지하" else ("옥탑" if gubun == "옥탑" else f"{num}층")
+        detail = " · ".join(f"{u} {a:,.0f}㎡" for u, a in uses.items())
+        floors.append((_floor_sort_key(gubun, num), label, area_sum, detail))
+
+    floors.sort(key=lambda r: r[0], reverse=True)  # 위층부터
+    shown = floors[:max_floors]
+
+    name = _g(d.iloc[0], "건물명") or _g(d.iloc[0], "동명칭") or ""
+    header = f"■ 층별 구성 — {name}" if name else "■ 층별 구성"
+    parts = [header, f"  총 {len(floors)}개 층 (행 {total}건)", ""]
+    for _, label, area_sum, detail in shown:
+        line = f"  {label:>5}  {area_sum:>9,.0f}㎡"
+        if detail:
+            line += f"  {detail}"
+        parts.append(line)
+    if len(floors) > max_floors:
+        parts.append(f"  … {len(floors) - max_floors}개 층 생략 (max_floors로 조정)")
+    parts.append("")
+    parts.append(SOURCE)
+    return "\n".join(parts)
 
 
 def df_to_text(df: Optional[pd.DataFrame], max_rows: int = 50, note: str = "") -> str:
