@@ -15,7 +15,10 @@ from starlette.responses import JSONResponse
 from . import __version__
 from .client import ArchHubClient, KINDS, LEDGER_TYPES, PERMIT_TYPES, HOUSING_TYPES
 from .errors import not_found, format_error
-from .formatting import df_to_text, profile_to_text, district_to_text, floors_to_text, _date
+from .formatting import (
+    df_to_text, profile_to_text, district_to_text, floors_to_text,
+    price_history_to_text, demolitions_to_text, pipeline_to_text, _date,
+)
 
 SERVICE_KEY = os.environ.get("ARCHHUB_SERVICE_KEY", "").strip()
 KEY_EXPIRES = os.environ.get("ARCHHUB_KEY_EXPIRES", "").strip()  # 공용키 만료일 YYYY-MM-DD(선택)
@@ -354,6 +357,115 @@ def building_floors(
     return floors_to_text(df, total, max_floors)
 
 
+@mcp.tool
+def price_history(
+    sigungu_code: str,
+    bdong_code: str,
+    bun: str,
+    ji: str = "",
+    top_units: int = 10,
+) -> str:
+    """한 필지의 공시가격(주택가격) 연도별 추이를 호별로 조회한다.
+
+    건축물대장 주택가격을 받아 호(관리건축물대장PK)별로 stdDay(기준일) 순 시계열을 만들고
+    최신 공시가·최초→최신 추이·총증감률·연평균상승률(CAGR)을 요약한다. 집합건물은
+    호×연도라 행이 많으므로 필지(bun) 단위로 수집한다. (감정평가·중개·자산분석용.
+    공시가격은 공개 API값이며 소유자 정보는 포함하지 않는다.)
+
+    Args:
+        sigungu_code: 시군구 5자리 코드 (find_region으로 조회).
+        bdong_code: 읍면동 5자리 코드.
+        bun: 번지 본번. **필수** (동 전체는 무거우므로 필지를 지정).
+        ji: 번지 부번(생략 가능).
+        top_units: 최신 공시가 상위 몇 호를 표시할지.
+    """
+    if not str(bun).strip():
+        return not_found(
+            "price_history는 번지(bun)가 필요합니다. (집합건물은 호×연도라 동 전체가 무거움)",
+            ["find_region으로 코드 확인 후 bun(본번) 지정"],
+        )
+    try:
+        df, total = client.query(
+            "ledger", "주택가격", sigungu_code, bdong_code,
+            bun=bun, ji=ji, fetch_all=True,
+        )
+    except Exception as e:
+        return format_error(e, "price_history")
+    if len(df) == 0:
+        return not_found(
+            f"주택가격(공시가격) 없음 (sigungu={sigungu_code}, bdong={bdong_code}, bun={bun}, ji={ji})",
+            ["find_region으로 코드 재확인", "ji(부번) 조정", "공시가격이 없는 필지(비주거 등)일 수 있음"],
+        )
+    return price_history_to_text(df, total, top_units, bun=bun, ji=ji)
+
+
+@mcp.tool
+def demolitions(
+    sigungu_code: str,
+    bdong_code: str,
+    since_year: int = 0,
+    top: int = 30,
+) -> str:
+    """법정동의 철거멸실 현황을 최근 철거순으로 조회한다 (석면 함유 포함).
+
+    건축인허가 철거멸실관리대장 전체를 받아 철거시작일/멸실일 기준 최근순으로 정렬하고,
+    연면적·용도·구조 + 석면(천장/단열/지붕/보온/바닥/기타) 함유 부위를 ⚠로 요약한다.
+    석면은 철거 안전·비용에 직결된다. 개발·멸실 신호 파악용. (디벨로퍼·철거업체·공무원)
+    동 전체를 받으므로 응답이 다소 느릴 수 있다.
+
+    Args:
+        sigungu_code: 시군구 5자리 코드 (find_region으로 조회).
+        bdong_code: 읍면동 5자리 코드.
+        since_year: 이 연도 이후(철거시작/멸실 기준)만. 0이면 전체.
+        top: 반환 최대 건수.
+    """
+    try:
+        df, total = client.query("permit", "철거멸실관리대장", sigungu_code, bdong_code, fetch_all=True)
+    except Exception as e:
+        return format_error(e, "demolitions")
+    if len(df) == 0:
+        return not_found(
+            f"철거멸실 데이터 없음 (sigungu={sigungu_code}, bdong={bdong_code})",
+            ["find_region으로 코드 재확인"],
+        )
+    collected = len(df)
+    trunc = f" (응답 한도로 {collected}건만 수집)" if collected < total else ""
+    return demolitions_to_text(df, total, trunc, since_year or None, top)
+
+
+@mcp.tool
+def permits_pipeline(
+    sigungu_code: str,
+    bdong_code: str,
+    since_year: int = 0,
+    top: int = 30,
+) -> str:
+    """법정동의 건축 인허가 파이프라인(사용승인 전 진행중 건)을 조회한다.
+
+    건축인허가 기본개요 전체를 받아 허가는 났으나 사용승인 전인 '진행중' 건만 추려
+    건축허가일 최근순으로 정렬한다. 실제착공일 유무로 착공/미착공 단계를 구분해 신규
+    공급 파이프라인을 파악한다. (디벨로퍼·공무원용) 동 전체를 받아 다소 느릴 수 있다.
+
+    Args:
+        sigungu_code: 시군구 5자리 코드 (find_region으로 조회).
+        bdong_code: 읍면동 5자리 코드.
+        since_year: 이 연도 이후(건축허가일 기준)만. 0이면 전체.
+        top: 반환 최대 건수.
+    """
+    try:
+        df, total = client.query("permit", "기본개요", sigungu_code, bdong_code, fetch_all=True)
+    except Exception as e:
+        return format_error(e, "permits_pipeline")
+    if len(df) == 0:
+        return not_found(
+            f"건축인허가 기본개요 없음 (sigungu={sigungu_code}, bdong={bdong_code})",
+            ["find_region으로 코드 재확인"],
+        )
+    collected = len(df)
+    trunc = f" (응답 한도로 {collected}건만 수집)" if collected < total else ""
+    return pipeline_to_text(df, total, trunc, since_year or None, top)
+
+
 # ---- HTTP 라우트 ----
 
 
@@ -380,8 +492,9 @@ async def root(request):
         "version": __version__,
         "transport": "streamable-http",
         "endpoint": "/mcp",
-        "tools": ["find_region", "building_profile", "building_floors", "building_ledger",
-                  "building_permit", "housing_permit", "old_buildings", "district_stats"],
+        "tools": ["find_region", "building_profile", "building_floors", "price_history",
+                  "building_ledger", "building_permit", "housing_permit",
+                  "old_buildings", "district_stats", "demolitions", "permits_pipeline"],
         "source": "국토교통부 건축HUB (data.go.kr)",
     })
 

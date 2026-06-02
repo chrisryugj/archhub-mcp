@@ -43,6 +43,18 @@ def _area(v) -> Optional[str]:
     return f"{f:,.2f}㎡" if f is not None else None
 
 
+def _eok(v) -> Optional[str]:
+    """원 단위 금액을 'N.NN억'으로. 빈값·0·파싱불가는 None."""
+    f = _num(v)
+    return f"{f / 1e8:.2f}억" if f is not None else None
+
+
+def _year_of(v) -> Optional[int]:
+    """YYYYMMDD/YYYY... 앞 4자리를 연도(int)로. 공백·비숫자는 None."""
+    s = str(v).strip()
+    return int(s[:4]) if len(s) >= 4 and s[:4].isdigit() else None
+
+
 def building_card(row: pd.Series) -> str:
     """건축물대장 표제부 1행(동)을 사람이 읽기 좋은 종합카드 텍스트로."""
     name = _g(row, "건물명") or _g(row, "동명칭") or "(건물명 없음)"
@@ -197,6 +209,29 @@ def district_to_text(
             asuf = f" · 연면적 {a:,.0f}㎡" if a else ""
             lines.append(f"  {name:<12} {cnt:>6,}동 ({_pct(cnt, n)}){asuf}")
 
+    # 규모 벤치마크 (주용도별 층수·용적률·높이 중앙값 — 건축사 설계 참고)
+    # 0은 미기재 취급(building_card와 동일) — 중앙값 왜곡 방지
+    far = pd.to_numeric(
+        df.get("용적률", pd.Series(dtype="object")).astype(str).str.replace(",", "").str.strip(),
+        errors="coerce",
+    ).replace(0, pd.NA)
+    height = pd.to_numeric(df.get("높이", pd.Series(dtype="object")), errors="coerce").replace(0, pd.NA)
+    floors_b = floors.replace(0, pd.NA)
+    if use is not None and (floors_b.notna().any() or far.notna().any() or height.notna().any()):
+        lines.append("")
+        lines.append(f"■ 규모 벤치마크 (주용도별 · 중앙값, 상위 {len(grp)})")
+        for name, cnt in grp.items():
+            mask = (u == name)
+            seg = []
+            if floors_b[mask].notna().any():
+                seg.append(f"지상 {floors_b[mask].median():.0f}층(최대 {floors_b[mask].max():.0f})")
+            if far[mask].notna().any():
+                seg.append(f"용적률 {far[mask].median():.0f}%")
+            if height[mask].notna().any():
+                seg.append(f"높이 {height[mask].median():.0f}m")
+            if seg:
+                lines.append(f"  {name:<12} {' · '.join(seg)}")
+
     # 사용승인 연대별
     if year.notna().any():
         decade = (year // 10 * 10).dropna().astype(int)
@@ -274,6 +309,212 @@ def floors_to_text(df: pd.DataFrame, total: int, max_floors: int = 60) -> str:
     parts.append("")
     parts.append(SOURCE)
     return "\n".join(parts)
+
+
+def _sample_trend(points: list[tuple[int, float]], max_points: int = 6) -> str:
+    """(연도, 가격) 리스트를 'YY N.NN억 → …' 추이 문자열로. 길면 최초·최신 포함 균등 샘플."""
+    if len(points) > max_points:
+        # 최초·최신은 항상, 사이는 균등 인덱스로 추림
+        idx = sorted({0, len(points) - 1, *(round(i * (len(points) - 1) / (max_points - 1)) for i in range(max_points))})
+        pts = [points[i] for i in idx]
+    else:
+        pts = points
+    return " → ".join(f"'{y % 100:02d} {p / 1e8:.2f}억" for y, p in pts)
+
+
+def price_history_to_text(
+    df: pd.DataFrame, total: int, top_units: int, bun: str = "", ji: str = "",
+) -> str:
+    """주택가격(공시가격) 시계열을 호별로 묶어 추이·증감·연평균상승률로 요약.
+
+    한 호(관리건축물대장PK)에 stdDay(YYYY0101 기준일)별 공시가격이 행으로 쌓여 있다.
+    호별로 연도순 정렬해 최신가·최초→최신 추이·총증감률·연평균상승률(CAGR)을 낸다.
+    호는 최신 공시가 내림차순으로 top_units개만 표시.
+    """
+    d = df.copy()
+    d["_price"] = pd.to_numeric(
+        d.get("주택가격", pd.Series(dtype="object")).astype(str).str.replace(",", "").str.strip(),
+        errors="coerce",
+    )
+    d["_day"] = d.get("stdDay", pd.Series(dtype="object")).astype(str).str.strip()
+    d["_year"] = pd.to_numeric(d["_day"].str[:4].where(d["_day"].str.len() >= 4), errors="coerce")
+    d = d.dropna(subset=["_price", "_year"])
+    d = d[d["_price"] > 0]
+    if len(d) == 0 or "관리건축물대장PK" not in d.columns:
+        return "공시가격(주택가격) 데이터 없음 (0건)\n\n" + SOURCE
+    d["_year"] = d["_year"].astype(int)
+
+    units = []  # (최신가, 라벨, 추이문자열, 요약문자열)
+    for pk, sub in d.groupby("관리건축물대장PK"):
+        sub = sub.sort_values("_year")
+        pts = list(zip(sub["_year"].tolist(), sub["_price"].tolist()))
+        # 같은 연도 중복은 마지막값으로 정리
+        dedup: dict[int, float] = {}
+        for y, p in pts:
+            dedup[y] = p
+        pts = sorted(dedup.items())
+        y0, p0 = pts[0]
+        y1, p1 = pts[-1]
+        years = y1 - y0
+        chg = (p1 - p0) / p0 * 100 if p0 else 0.0
+        cagr = ((p1 / p0) ** (1 / years) - 1) * 100 if years > 0 and p0 > 0 else None
+        addr = _g(sub.iloc[0], "새주소본번")
+        addr_sub = _g(sub.iloc[0], "새주소부번")
+        suffix = ""
+        if addr:
+            suffix = f" · 새주소 {addr}" + (f"-{addr_sub}" if addr_sub else "")
+        label = f"호 PK…{str(pk)[-4:]}{suffix}"
+        summary = f"최신 {p1 / 1e8:.2f}억 ({y1}) · 최초 {p0 / 1e8:.2f}억 ({y0}) · {years}년간 {chg:+.1f}%"
+        if cagr is not None:
+            summary += f" · 연평균 {cagr:+.1f}%"
+        units.append((p1, label, _sample_trend(pts), summary))
+
+    units.sort(key=lambda u: u[0], reverse=True)
+    shown = units[:top_units]
+
+    loc = f"{bun}-{ji}" if ji else (bun or "")
+    head = f"[공시가격 시계열] {loc}".strip()
+    lines = [f"{head} · 주택가격 {total}건 · {len(units)}호"]
+    if len(units) > top_units:
+        lines.append(f"최신 공시가 상위 {top_units}호 표시 (top_units로 조정)")
+    lines.append("")
+    for _, label, trend, summary in shown:
+        lines.append(f"■ {label}")
+        lines.append(f"  {summary}")
+        lines.append(f"  추이: {trend}")
+        lines.append("")
+    lines.append(SOURCE)
+    return "\n".join(lines)
+
+
+# 철거멸실관리대장 석면(함유) 조사 컬럼 → 표시 라벨. 값 '1'=함유.
+_ASBESTOS = {
+    "천장재함유유무": "천장", "단열재함유유무": "단열", "지붕재함유유무": "지붕",
+    "보온재함유유무": "보온", "바닥재함유유무": "바닥", "기타함유유무": "기타",
+}
+
+
+def demolitions_to_text(
+    df: pd.DataFrame, total: int, trunc: str = "",
+    since_year: Optional[int] = None, top: int = 30,
+) -> str:
+    """철거멸실관리대장을 최근 철거(시작일/멸실일) 순으로. 석면 함유 부위를 ⚠로 요약.
+
+    철거 일정·연면적·용도·구조 + 석면(천장/단열/지붕/보온/바닥/기타) 함유 여부를 묶는다.
+    석면은 철거 안전·비용에 직결되므로 함유 부위를 명시한다. (디벨로퍼·철거업체·공무원용)
+    """
+    d = df.copy()
+    start = d.get("철거시작일", pd.Series(dtype="object")).astype(str).str.strip()
+    demo = d.get("철거멸실일", pd.Series(dtype="object")).astype(str).str.strip()
+    key = start.where(start.str.len() >= 8, demo)  # 시작일 우선, 없으면 멸실일
+    d["_key"] = pd.to_numeric(key.str[:8].where(key.str.len() >= 8), errors="coerce").fillna(0)
+    # 원본에 미래 날짜 오타(예 21080607)가 있어 '최근순' 1위를 먹는다 → 정렬상 뒤로 강등
+    today_key = int(datetime.date.today().strftime("%Y%m%d"))
+    d["_key"] = d["_key"].where(d["_key"] <= today_key, 0)
+    d["_year"] = pd.to_numeric(key.str[:4].where(key.str.len() >= 4), errors="coerce")
+    if since_year is not None:
+        d = d[d["_year"] >= since_year]
+    d = d.sort_values("_key", ascending=False)
+
+    n = len(d)
+    head = f"[철거멸실 현황] 철거멸실 {total}건{trunc}"
+    if since_year is not None:
+        head += f" 중 {since_year}년↑ {n}건"
+    lines = [f"{head} (최근 철거순)"]
+    if n > top:
+        lines.append(f"상위 {top}건 표시 (top으로 조정)")
+    lines.append("")
+
+    for _, row in d.head(top).iterrows():
+        loc = _g(row, "도로명대지위치") or _g(row, "대지위치") or "(위치 미상)"
+        kind = _g(row, "철거멸실구분코드명")
+        use = _g(row, "주용도코드명")
+        struct = _g(row, "구조코드명")
+        gfa = _area(row.get("연면적(㎡)"))
+        s_d, e_d = _date(row.get("철거시작일")), _date(row.get("철거종료일"))
+        m_d = _date(row.get("철거멸실일"))
+        if s_d:
+            period = f"철거 {s_d}~{e_d}" if e_d else f"철거 {s_d}~"
+        elif m_d:
+            period = f"멸실 {m_d}"
+        else:
+            period = "일자 미상"
+        asb = [lab for col, lab in _ASBESTOS.items() if str(row.get(col, "")).strip() == "1"]
+        asb_str = f" ⚠석면({'·'.join(asb)})" if asb else ""
+
+        seg = [kind or "철거", use or "용도미상"]
+        if struct:
+            seg.append(struct)
+        if gfa:
+            seg.append(f"연면적 {gfa}")
+        seg.append(period)
+        lines.append(f"■ {loc}")
+        lines.append(f"  {' · '.join(seg)}{asb_str}")
+
+    lines.append("")
+    lines.append(SOURCE)
+    return "\n".join(lines)
+
+
+def pipeline_to_text(
+    df: pd.DataFrame, total: int, trunc: str = "",
+    since_year: Optional[int] = None, top: int = 30,
+) -> str:
+    """건축인허가 기본개요에서 '사용승인 전(진행중)' 건만 추려 허가일 최근순으로.
+
+    단계: 실제착공일 有 = 착공, 空 = 미착공. (신규 공급 파이프라인 파악 — 디벨로퍼용)
+    주: translate_columns가 건축구분코드명↔건축구분코드를 뒤바꿔, 실제 명칭은 '건축구분코드'에 있다.
+    """
+    d = df.copy()
+    appr = d.get("사용승인일", pd.Series(dtype="object")).astype(str).str.strip()
+    permit = d.get("건축허가일", pd.Series(dtype="object")).astype(str).str.strip()
+    has_appr = appr.str.len() >= 8
+    has_permit = permit.str.len() >= 8
+    d["_pkey"] = pd.to_numeric(permit.str[:8].where(has_permit), errors="coerce").fillna(0)
+    d["_pyear"] = pd.to_numeric(permit.str[:4].where(permit.str.len() >= 4), errors="coerce")
+    prog = d[(~has_appr) & has_permit]  # 허가는 났고 사용승인 전 = 진행중
+    if since_year is not None:
+        prog = prog[prog["_pyear"] >= since_year]
+    prog = prog.sort_values("_pkey", ascending=False)
+
+    n = len(prog)
+    head = f"[인허가 파이프라인] 기본개요 {total}건{trunc} 중 진행중(사용승인 전) {n}건"
+    if since_year is not None:
+        head += f" · 허가 {since_year}년↑"
+    lines = [head]
+    if n > top:
+        lines.append(f"허가일 최근순 상위 {top}건 표시 (top으로 조정)")
+    lines.append("")
+
+    for _, row in prog.head(top).iterrows():
+        loc = _g(row, "대지위치")
+        name = _g(row, "건물명")
+        title = (loc or "(위치 미상)") + (f" — {name}" if name else "")
+        kind = _g(row, "건축구분코드")  # swap된 컬럼: 실제 명칭(신축/대수선 등)
+        use = _g(row, "주용도코드명")
+        gfa = _area(row.get("연면적(㎡)"))
+        se = _g(row, "세대수(세대)")
+        p_d = _date(row.get("건축허가일"))
+        started = _date(row.get("실제착공일"))
+        stage = "착공" if started else "미착공"
+
+        scale = []
+        if gfa:
+            scale.append(f"연면적 {gfa}")
+        if se:
+            scale.append(f"{se}세대")
+        seg = [s for s in [kind, use] if s]
+        if scale:
+            seg.append(" ".join(scale))
+        if p_d:
+            seg.append(f"허가 {p_d}")
+        seg.append(f"단계: {stage}" + (f"({started})" if started else ""))
+        lines.append(f"■ {title}")
+        lines.append(f"  {' · '.join(seg)}")
+
+    lines.append("")
+    lines.append(SOURCE)
+    return "\n".join(lines)
 
 
 def df_to_text(df: Optional[pd.DataFrame], max_rows: int = 50, note: str = "") -> str:
