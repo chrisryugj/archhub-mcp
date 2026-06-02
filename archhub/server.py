@@ -7,22 +7,61 @@ stdio 모드(로컬 Claude Desktop/Code)와 streamable-http 모드(fly.io remote
 import argparse
 import datetime
 import os
+from pathlib import Path
 
 import pandas as pd
 from fastmcp import FastMCP
 from starlette.responses import JSONResponse
 
 from . import __version__
-from .client import ArchHubClient, KINDS, LEDGER_TYPES, PERMIT_TYPES, HOUSING_TYPES
+from .client import ArchHubClient, KINDS, LEDGER_TYPES, PERMIT_TYPES, HOUSING_TYPES, DAILY_CALL_CAP
 from .errors import not_found, format_error
 from .formatting import (
     df_to_text, profile_to_text, district_to_text, floors_to_text,
-    price_history_to_text, demolitions_to_text, pipeline_to_text, _date,
+    price_history_to_text, demolitions_to_text, pipeline_to_text, _date, _age_years,
 )
+
+
+def _load_env_local() -> None:
+    """.env.local(KEY=VALUE)을 os.environ에 주입한다(이미 설정된 키는 보존).
+
+    README가 안내하는 .env.local을 실제로 로드한다. python-dotenv 의존 없이 stdlib로
+    처리(로컬 편의 한정 — 운영은 fly secrets/환경변수 사용)."""
+    for base in (Path.cwd(), Path(__file__).resolve().parent.parent):
+        path = base / ".env.local"
+        if not path.exists():
+            continue
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, _, v = line.partition("=")
+                k, v = k.strip(), v.strip().strip('"').strip("'")
+                if k and k not in os.environ:
+                    os.environ[k] = v
+        except OSError:
+            pass
+        return
+
+
+_load_env_local()
 
 SERVICE_KEY = os.environ.get("ARCHHUB_SERVICE_KEY", "").strip()
 KEY_EXPIRES = os.environ.get("ARCHHUB_KEY_EXPIRES", "").strip()  # 공용키 만료일 YYYY-MM-DD(선택)
+MCP_TOKEN = os.environ.get("ARCHHUB_MCP_TOKEN", "").strip()      # 설정 시 remote 접근에 Bearer 토큰 요구
 client = ArchHubClient(SERVICE_KEY)
+
+
+def _build_auth():
+    """ARCHHUB_MCP_TOKEN이 설정되면 Bearer 토큰 인증을 켠다(공개 remote의 공용키 보호).
+
+    미설정이면 None — 무인증 유지(로컬 stdio 등 신뢰 환경 호환). fly 배포 시
+    `fly secrets set ARCHHUB_MCP_TOKEN=...` 로 켜고, 허가된 사용자에게만 토큰을 공유한다."""
+    if not MCP_TOKEN:
+        return None
+    from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
+    return StaticTokenVerifier(tokens={MCP_TOKEN: {"client_id": "archhub"}})
 
 
 def _key_expiry_days():
@@ -61,6 +100,7 @@ mcp = FastMCP(
         "주소는 먼저 find_region으로 sigungu_code/bdong_code를 얻은 뒤 다른 도구에 넘긴다. "
         "데이터는 모두 공식 API 실측값이며, 결과가 없으면 추측하지 말고 '데이터 없음'을 보고한다."
     ),
+    auth=_build_auth(),
 )
 
 
@@ -262,13 +302,11 @@ def old_buildings(
     if col not in df.columns:
         return format_error(Exception(f"표제부에 '{col}' 컬럼 없음. 실제 컬럼: {list(df.columns)}"), "old_buildings")
 
-    this_year = datetime.date.today().year
     d = df.copy()
     d[col] = d[col].astype(str).str.strip()
-    d = d[d[col].str.len() >= 4]
-    d["승인연도"] = pd.to_numeric(d[col].str[:4], errors="coerce")
-    d = d.dropna(subset=["승인연도"])
-    d["경과연수"] = this_year - d["승인연도"].astype(int)
+    d["경과연수"] = pd.to_numeric(d[col].map(_age_years), errors="coerce")  # 월·일 반영 만 경과연수
+    d = d.dropna(subset=["경과연수"])
+    d["경과연수"] = d["경과연수"].astype(int)
     old = d[d["경과연수"] >= min_age_years].sort_values("경과연수", ascending=False)
     if len(old) == 0:
         return not_found(f"경과 {min_age_years}년 이상 건축물 없음 (표제부 전체 {total}건)")
@@ -475,7 +513,10 @@ async def health(request):
         "status": "ok",
         "version": __version__,
         "key_loaded": bool(SERVICE_KEY),
-        "api_calls": client.api_calls,  # 프로세스 생존 동안 data.go.kr 호출수(공용키 한도 관측용)
+        "auth_required": bool(MCP_TOKEN),       # Bearer 토큰 인증 활성 여부
+        "api_calls": client.api_calls,          # 프로세스 생존 동안 data.go.kr 호출수(공용키 한도 관측용)
+        "calls_today": client._calls_today,     # 오늘 호출수(일일 캡 관측)
+        "daily_cap": DAILY_CALL_CAP or None,    # 일일 호출 캡(0/미설정이면 null)
     }
     days = _key_expiry_days()
     if days is not None:

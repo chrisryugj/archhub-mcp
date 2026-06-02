@@ -38,6 +38,22 @@ def _date(v) -> Optional[str]:
     return None
 
 
+def _age_years(v, today: Optional[datetime.date] = None) -> Optional[int]:
+    """사용승인일(YYYYMMDD 등) → 오늘 기준 만 경과연수. 파싱불가면 None.
+
+    연도만 빼는 게 아니라 월·일까지 반영한다(승인일이 아직 안 지난 해는 1년 차감).
+    예: 1996-12-31 승인 → 2026-06-02 기준 29년(아직 만 30년 아님)."""
+    s = str(v).strip()
+    if len(s) < 4 or not s[:4].isdigit():
+        return None
+    today = today or datetime.date.today()
+    y = int(s[:4])
+    m = int(s[4:6]) if len(s) >= 6 and s[4:6].isdigit() and 1 <= int(s[4:6]) <= 12 else 1
+    d = int(s[6:8]) if len(s) >= 8 and s[6:8].isdigit() and 1 <= int(s[6:8]) <= 31 else 1
+    age = today.year - y - ((today.month, today.day) < (m, d))
+    return age if age >= 0 else None
+
+
 def _area(v) -> Optional[str]:
     f = _num(v)
     return f"{f:,.2f}㎡" if f is not None else None
@@ -182,7 +198,7 @@ def district_to_text(
     floors = pd.to_numeric(df.get("지상층수", pd.Series(dtype="object")), errors="coerce")
     appr = df.get("사용승인일", pd.Series(dtype="object")).astype(str).str.strip()
     year = pd.to_numeric(appr.str[:4].where(appr.str.len() >= 4), errors="coerce")
-    age = datetime.date.today().year - year
+    age = pd.to_numeric(appr.map(_age_years), errors="coerce")  # 월·일 반영 만 경과연수
 
     lines = [f"[법정동 건축물 통계] 표제부 {total}건{trunc} 기준", ""]
 

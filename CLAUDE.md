@@ -17,9 +17,13 @@ archhub/
 ## 핵심 설계 결정
 
 - **호출은 직접 REST**: PublicDataReader의 `get_data()`는 `numOfRows=99999` 한 방 + timeout 없음 →
-  MCP에 부적합. 그래서 `requests`로 timeout/numOfRows/pageNo 직접 제어.
+  MCP에 부적합. 그래서 `requests`로 timeout/numOfRows/pageNo 직접 제어. 엔드포인트는 `https`로
+  승격하고 `verify=True`(평문 http면 키 노출). `fetch_all`은 행/페이지/총deadline 3중 상한으로 절단.
 - **라이브러리 재활용은 2가지만**: `meta_dict[type]["url"]`(엔드포인트 매핑), `translate_columns(df)`(한글 변환).
-- **공용키 방식**: `ARCHHUB_SERVICE_KEY` 환경변수 하나로 모든 요청 처리 (BYOK 격리 없음).
+  단 `code_bdong()`은 쓰지 않음 — timeout 없고 stdout에 `print()`(stdio JSON-RPC 오염). 같은 JSON을
+  timeout 걸어 직접 받아 `~/.cache/archhub-mcp`에 캐시(`client._load_bdong_json`).
+- **공용키 방식**: `ARCHHUB_SERVICE_KEY` 하나로 모든 요청 처리 (BYOK 격리 없음). 공개 remote 보호는
+  opt-in: `ARCHHUB_MCP_TOKEN`(Bearer 인증·미설정 시 무인증) + `ARCHHUB_DAILY_CALL_CAP`(일일 호출 캡).
 - **remote 커넥터**: fly.io에 streamable-http로 떠서 URL만 등록하면 연결.
 
 ## 검증

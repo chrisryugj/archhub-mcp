@@ -45,8 +45,59 @@ def test_query_rejects_unknown_kind():
 
 def test_query_rejects_unknown_type():
     with pytest.raises(ArchHubError) as e:
-        ArchHubClient("k").query("ledger", "없는유형", "1", "1")
+        ArchHubClient("k").query("ledger", "없는유형", "11215", "10500")
     assert e.value.code == INVALID_PARAM
+
+
+@pytest.mark.parametrize("sg,bd", [("1", "10500"), ("11215", "abc"), ("112150", "10500"), ("", "10500")])
+def test_query_rejects_malformed_codes(sg, bd):
+    # #7: 5자리 숫자가 아니면 외부 API 호출 전에 INVALID_PARAMETER로 차단
+    with pytest.raises(ArchHubError) as e:
+        ArchHubClient("k").query("ledger", "표제부", sg, bd)
+    assert e.value.code == INVALID_PARAM
+
+
+def test_query_upgrades_http_to_https(monkeypatch):
+    # #4: meta_dict의 http 엔드포인트를 https로 승격해 호출
+    c = ArchHubClient("k")
+    seen = {}
+
+    def capture(url, params):
+        seen["url"] = url
+        return pd.DataFrame([{"x": 1}]), 1
+
+    monkeypatch.setattr(c, "_request_page", capture)
+    c.query("ledger", "표제부", "11215", "10500", translate=False)
+    assert seen["url"].startswith("https://")
+
+
+def test_fetch_all_stops_at_max_pages(monkeypatch):
+    # #3: total이 무한정이어도 페이지 상한에서 멈춰 워커 폭주 방지
+    c = ArchHubClient("k")
+    monkeypatch.setattr(client_mod.time, "sleep", lambda *a: None)
+    calls = {"n": 0}
+
+    def capture(url, params):
+        calls["n"] += 1
+        return pd.DataFrame([{"x": i} for i in range(100)]), 10_000_000
+
+    monkeypatch.setattr(c, "_request_page", capture)
+    c.query("ledger", "표제부", "11215", "10500", fetch_all=True, translate=False)
+    assert calls["n"] <= client_mod.MAX_FETCH_PAGES
+
+
+def test_daily_cap_blocks_when_exceeded(monkeypatch):
+    # #1: 일일 호출 캡 초과 시 EXTERNAL_API_ERROR로 차단
+    monkeypatch.setattr(client_mod, "DAILY_CALL_CAP", 2)
+    c = ArchHubClient("k")
+    j = _resp({"header": {"resultCode": "00"},
+               "body": {"totalCount": 1, "items": {"item": [{"a": 1}]}}})
+    monkeypatch.setattr(client_mod.requests, "get", lambda *a, **k: FakeResp(j))
+    c._request_page("http://x", {})
+    c._request_page("http://x", {})
+    with pytest.raises(ArchHubError) as e:
+        c._request_page("http://x", {})
+    assert e.value.code == API_ERROR
 
 
 # ---- _request_page 파싱 ----
@@ -116,7 +167,7 @@ def test_request_page_timeout_raises(monkeypatch):
 def test_query_single_page(monkeypatch):
     c = ArchHubClient("k")
     monkeypatch.setattr(c, "_request_page", lambda url, params: (pd.DataFrame([{"x": 1}]), 1))
-    df, total = c.query("ledger", "표제부", "1", "1", translate=False)
+    df, total = c.query("ledger", "표제부", "11215", "10500", translate=False)
     assert total == 1 and len(df) == 1
 
 
@@ -130,7 +181,7 @@ def test_query_caps_num_rows(monkeypatch):
         return pd.DataFrame([{"x": 1}]), 1
 
     monkeypatch.setattr(c, "_request_page", capture)
-    c.query("ledger", "표제부", "1", "1", num_rows=500, translate=False)
+    c.query("ledger", "표제부", "11215", "10500", num_rows=500, translate=False)
     assert seen["rows"] == MAX_NUM_ROWS == 100
 
 
@@ -140,7 +191,7 @@ def test_fetch_all_truncates_at_max_rows(monkeypatch):
     monkeypatch.setattr(client_mod.time, "sleep", lambda *a: None)
     page = pd.DataFrame([{"x": i} for i in range(100)])
     monkeypatch.setattr(c, "_request_page", lambda url, params: (page, 50000))
-    df, total = c.query("ledger", "표제부", "1", "1", fetch_all=True, translate=False)
+    df, total = c.query("ledger", "표제부", "11215", "10500", fetch_all=True, translate=False)
     assert total == 50000
     assert len(df) == MAX_FETCH_ROWS  # 10000에서 절단
 
@@ -151,7 +202,7 @@ def test_fetch_all_stops_when_collected_all(monkeypatch):
     monkeypatch.setattr(client_mod.time, "sleep", lambda *a: None)
     page = pd.DataFrame([{"x": i} for i in range(100)])
     monkeypatch.setattr(c, "_request_page", lambda url, params: (page, 250))
-    df, total = c.query("ledger", "표제부", "1", "1", fetch_all=True, translate=False)
+    df, total = c.query("ledger", "표제부", "11215", "10500", fetch_all=True, translate=False)
     assert total == 250 and len(df) == 300  # 100*3페이지 (got>=total에서 멈춤)
 
 

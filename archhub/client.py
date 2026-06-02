@@ -7,7 +7,11 @@ requests에 timeout이 없어 MCP(빠른 응답)에 부적합하다. 따라서 H
   - translate_columns(df)   : 영문 → 한글 컬럼 rename
 """
 
+import datetime
+import json
+import os
 import time
+from pathlib import Path
 from typing import Optional
 
 import pandas as pd
@@ -16,12 +20,9 @@ from PublicDataReader import (
     BuildingLedger,
     BuildingLicense,
     HousingLicense,
-    code_bdong,
 )
 
-from .errors import ArchHubError, NO_KEY, INVALID_PARAM, API_ERROR, NOT_FOUND
-
-requests.packages.urllib3.disable_warnings()  # data.go.kr는 http + 자가서명 경고 발생
+from .errors import ArchHubError, NO_KEY, INVALID_PARAM, API_ERROR
 
 # 조회 유형(소유자 제외 — 개인정보·별도 엔드포인트라 MVP 범위 밖)
 LEDGER_TYPES = [
@@ -53,6 +54,32 @@ MAX_NUM_ROWS = 100
 # fetch_all 분석은 이 행 상한까지만 수집(응답시간 폭주 방지). 자양동(6057건)은 완수,
 # 1만건 초과 동만 일부 수집되며 호출측이 len(df) < total 로 절단을 감지한다.
 MAX_FETCH_ROWS = 10000
+MAX_FETCH_PAGES = 100               # 100건/page → 행 상한과 정합(폭주 페이지 루프 차단)
+FETCH_ALL_DEADLINE_S = 60           # 동 전체 수집 총 시간 상한(초) — 워커 장시간 점유 방지
+
+# 공용키 일일 호출 캡. 공공데이터포털 일 한도 보호용. 0(기본)이면 미적용.
+# 운영(공개 remote)에서는 키 한도에 맞춰 ARCHHUB_DAILY_CALL_CAP을 설정 권장.
+DAILY_CALL_CAP = int(os.environ.get("ARCHHUB_DAILY_CALL_CAP", "0") or "0")
+
+# 법정동코드 JSON(현행 전체) — WooilJeong/code 저장소. PublicDataReader.code_bdong()은
+# timeout 없이 받고 stdout에 print()를 한다(stdio MCP의 JSON-RPC를 오염시킴). 그래서
+# 같은 URL을 timeout 걸어 직접 받고 디스크에 캐시한다(stdout 무오염).
+BDONG_JSON_URL = "https://raw.githubusercontent.com/WooilJeong/code/main/code/code_dong/code_bdong.json"
+BDONG_CACHE_PATH = Path(
+    os.environ.get("ARCHHUB_CACHE_DIR") or (Path.home() / ".cache" / "archhub-mcp")
+) / "code_bdong.json"
+BDONG_FETCH_TIMEOUT = 30
+
+
+def _validate_codes(sigungu_code, bdong_code) -> None:
+    """sigungu_code/bdong_code가 5자리 숫자인지 검증(외부 API 호출 전 차단)."""
+    for name, v in (("sigungu_code", sigungu_code), ("bdong_code", bdong_code)):
+        s = str(v).strip()
+        if not (s.isdigit() and len(s) == 5):
+            raise ArchHubError(
+                f"{name}는 5자리 숫자여야 합니다(받음: '{v}'). find_region으로 코드를 확인하세요.",
+                code=INVALID_PARAM,
+            )
 
 
 class ArchHubClient:
@@ -69,16 +96,48 @@ class ArchHubClient:
         # data.go.kr 외부 호출 건수(프로세스 생존 동안). 공용키 일 한도 관측용.
         # 페이지당 1콜이라 fetch_all은 여러 번 증가. 정확한 잔여량은 API가 안 줘서 근사.
         self.api_calls = 0
+        # 일일 캡(DAILY_CALL_CAP)용 — 날짜가 바뀌면 0으로 리셋.
+        self._calls_today = 0
+        self._calls_date = datetime.date.today().isoformat()
 
     # ---- 지역코드 ----
 
     def bdong_table(self) -> pd.DataFrame:
         """법정동코드 테이블(현행만) 1회 로드 후 캐시."""
         if self._bdong is None:
-            df = code_bdong()
+            raw = self._load_bdong_json()
+            df = pd.DataFrame(raw["data"]).fillna("")
             df = df[df["말소일자"].astype(str).str.strip() == ""].copy()
             self._bdong = df
         return self._bdong
+
+    def _load_bdong_json(self) -> dict:
+        """법정동 JSON을 디스크 캐시에서 읽고, 없으면 timeout 걸어 받아 캐시한다.
+
+        PublicDataReader.code_bdong()을 쓰지 않는 이유: timeout이 없어 워커가
+        무한 대기할 수 있고, 성공 시 stdout에 print()를 해 stdio MCP의 JSON-RPC
+        스트림을 오염시킨다. 여기서는 stdout을 건드리지 않고 timeout을 강제한다.
+        """
+        if BDONG_CACHE_PATH.exists():
+            try:
+                return json.loads(BDONG_CACHE_PATH.read_text(encoding="utf-8"))
+            except (ValueError, OSError):
+                pass  # 캐시 손상 → 재다운로드
+        try:
+            r = requests.get(BDONG_JSON_URL, timeout=BDONG_FETCH_TIMEOUT)
+            r.raise_for_status()
+            data = r.json()
+        except requests.RequestException as e:
+            raise ArchHubError(
+                f"법정동코드 데이터를 받지 못했습니다: {e}. 네트워크를 확인하세요.",
+                code=API_ERROR,
+            )
+        try:
+            BDONG_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+            BDONG_CACHE_PATH.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        except OSError:
+            pass  # 캐시 못 써도 메모리로는 동작
+        return data
 
     def find_region(self, keyword: str) -> pd.DataFrame:
         """주소 키워드(공백 구분, AND)로 법정동을 검색. sigungu_code/bdong_code 컬럼 부여."""
@@ -129,10 +188,16 @@ class ArchHubClient:
                 f"잘못된 조회 유형 '{type_name}'. 가능값: {', '.join(valid_types)}",
                 code=INVALID_PARAM,
             )
+        _validate_codes(sigungu_code, bdong_code)
+        for label, v in (("bun", bun), ("ji", ji)):
+            if v not in (None, "") and not str(v).strip().isdigit():
+                raise ArchHubError(f"{label}은 숫자여야 합니다(받음: '{v}').", code=INVALID_PARAM)
 
         inst = self._inst[kind]
-        url = inst.meta_dict[type_name]["url"]
+        # 건축HUB 엔드포인트는 https를 제공한다. 평문 http면 키·응답이 노출되므로 강제 승격.
+        url = inst.meta_dict[type_name]["url"].replace("http://", "https://", 1)
         rows = min(max(int(num_rows), 1), MAX_NUM_ROWS)
+        page_no = min(max(int(page_no), 1), MAX_FETCH_PAGES)
 
         base_params = {
             "serviceKey": self.service_key,
@@ -149,6 +214,7 @@ class ArchHubClient:
         frames: list[pd.DataFrame] = []
         page = 1 if fetch_all else page_no
         total = 0
+        deadline = time.monotonic() + FETCH_ALL_DEADLINE_S
         while True:
             params = dict(base_params, pageNo=page)
             sub, total = self._request_page(url, params)
@@ -156,12 +222,14 @@ class ArchHubClient:
                 frames.append(sub)
             if not fetch_all:
                 break
-            # fetch_all: 다음 페이지 필요 여부 판단
+            # fetch_all: 다음 페이지 필요 여부 판단(아래 상한 중 하나라도 닿으면 절단)
             got = sum(len(f) for f in frames)
             if got >= total or len(sub) == 0:
                 break
-            if got >= MAX_FETCH_ROWS:
-                break  # 행 상한 도달 — 일부만 수집(호출측이 len(df)<total로 감지)
+            if got >= MAX_FETCH_ROWS or page >= MAX_FETCH_PAGES:
+                break  # 행/페이지 상한 도달 — 일부만 수집(호출측이 len(df)<total로 감지)
+            if time.monotonic() >= deadline:
+                break  # 총 데드라인 초과 — 워커 장시간 점유 방지
             page += 1
             time.sleep(0.1)  # 과도한 연속요청 방지(페이지당 100건이라 호출 잦음)
 
@@ -174,11 +242,25 @@ class ArchHubClient:
             df = inst.translate_columns(df)
         return df, total
 
+    def _enforce_daily_cap(self) -> None:
+        """일일 호출 캡 적용. 날짜가 바뀌면 카운터를 리셋한다."""
+        today = datetime.date.today().isoformat()
+        if today != self._calls_date:
+            self._calls_date = today
+            self._calls_today = 0
+        self._calls_today += 1
+        if DAILY_CALL_CAP and self._calls_today > DAILY_CALL_CAP:
+            raise ArchHubError(
+                f"오늘 공용키 호출 한도({DAILY_CALL_CAP}건)를 초과했습니다. 잠시 후/내일 다시 시도하세요.",
+                code=API_ERROR,
+            )
+
     def _request_page(self, url: str, params: dict) -> tuple[pd.DataFrame, int]:
         """단일 페이지 요청 → (DataFrame, totalCount)."""
+        self._enforce_daily_cap()
         self.api_calls += 1
         try:
-            r = requests.get(url, params=params, verify=False, timeout=self.timeout)
+            r = requests.get(url, params=params, timeout=self.timeout)
         except requests.Timeout:
             raise ArchHubError(
                 f"API 응답 시간 초과({self.timeout}s). 동 전체보다 번지(bun)를 지정하면 빨라집니다.",

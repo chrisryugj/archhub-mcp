@@ -364,11 +364,12 @@ claude mcp add archhub -e ARCHHUB_SERVICE_KEY=<디코딩 키> -- archhub-mcp
 ## 테스트 · 개발
 
 ```bash
-pip install -e ".[dev]"
-pytest tests/        # 외부 API 비의존(네트워크 mock) · 51 케이스
+pip install -e ".[dev]"   # 먼저 설치(안 하면 bare `pytest`는 ModuleNotFoundError)
+pytest tests/             # 외부 API 비의존(네트워크 mock) · 58 케이스
 ```
 
-응답파싱·키마스킹·카드 계산식·`fetch_all` 페이지절단 회귀·동단위 집계·키 만료 계산을 막는다.
+응답파싱·키마스킹·카드 계산식·`fetch_all` 페이지·행 상한 절단·동단위 집계·키 만료 계산,
+그리고 코드 입력검증·일일 호출 캡·http→https 승격·만 경과연수 계산을 회귀로 막는다.
 
 ---
 
@@ -377,10 +378,16 @@ pytest tests/        # 외부 API 비의존(네트워크 mock) · 51 케이스
 ```bash
 fly launch --no-deploy                              # fly.toml 인식
 fly secrets set ARCHHUB_SERVICE_KEY="<디코딩 키>"   # 공용키 주입 (평문 커밋 금지)
+fly secrets set ARCHHUB_MCP_TOKEN="<랜덤 토큰>"     # 공개 보호: 접근에 Bearer 토큰 요구
+fly secrets set ARCHHUB_DAILY_CALL_CAP=9000         # 공용키 일 한도 보호 (키 한도에 맞춰)
 fly deploy
 ```
 
-`auto_stop_machines=suspend` + `min_machines_running=0`로 무요청 시 0대까지 내려가 비용 절감, 요청 오면 자동 기동. `/health`는 버전·키 적재 여부·**키 만료 D-day**·프로세스 API 호출수를 노출한다.
+> **공개 remote 운영 시 `ARCHHUB_MCP_TOKEN`을 반드시 설정**한다. 미설정이면 무인증이라
+> 누구든 공용키를 소모할 수 있다. 설정 시 클라이언트는 `Authorization: Bearer <토큰>`을 보내야 하며,
+> 허가된 사용자에게만 토큰을 공유한다. `ARCHHUB_DAILY_CALL_CAP`은 일일 호출 상한(초과 시 차단)이다.
+
+`auto_stop_machines=suspend` + `min_machines_running=0`로 무요청 시 0대까지 내려가 비용 절감, 요청 오면 자동 기동. `/health`는 버전·키 적재 여부·**인증 활성 여부**·**키 만료 D-day**·오늘/누적 API 호출수·일일 캡을 노출한다.
 
 ---
 
