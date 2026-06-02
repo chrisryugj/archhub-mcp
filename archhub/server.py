@@ -26,7 +26,10 @@ def _load_env_local() -> None:
     """.env.local(KEY=VALUE)을 os.environ에 주입한다(이미 설정된 키는 보존).
 
     README가 안내하는 .env.local을 실제로 로드한다. python-dotenv 의존 없이 stdlib로
-    처리(로컬 편의 한정 — 운영은 fly secrets/환경변수 사용)."""
+    처리(로컬 편의 한정 — 운영은 fly secrets/환경변수 사용).
+
+    cwd와 패키지 부모를 모두 순회한다(빈 .env.local에 막히지 않도록). cwd를 먼저 읽고
+    'k not in os.environ' 가드로 먼저 채운 키를 보존하므로 cwd가 우선한다."""
     for base in (Path.cwd(), Path(__file__).resolve().parent.parent):
         path = base / ".env.local"
         if not path.exists():
@@ -42,7 +45,6 @@ def _load_env_local() -> None:
                     os.environ[k] = v
         except OSError:
             pass
-        return
 
 
 _load_env_local()

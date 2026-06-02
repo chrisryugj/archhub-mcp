@@ -59,6 +59,8 @@ FETCH_ALL_DEADLINE_S = 60           # 동 전체 수집 총 시간 상한(초) �
 
 # 공용키 일일 호출 캡. 공공데이터포털 일 한도 보호용. 0(기본)이면 미적용.
 # 운영(공개 remote)에서는 키 한도에 맞춰 ARCHHUB_DAILY_CALL_CAP을 설정 권장.
+# 주의: 카운터는 프로세스 로컬이라 머신을 2대 이상으로 스케일하면 실효 한도 = 머신수×CAP
+# (분산 보장 아님). 단일 머신 전제에서만 정확하다.
 DAILY_CALL_CAP = int(os.environ.get("ARCHHUB_DAILY_CALL_CAP", "0") or "0")
 
 # 법정동코드 JSON(현행 전체) — WooilJeong/code 저장소. PublicDataReader.code_bdong()은
@@ -143,7 +145,8 @@ class ArchHubClient:
         """주소 키워드(공백 구분, AND)로 법정동을 검색. sigungu_code/bdong_code 컬럼 부여."""
         df = self.bdong_table()
         hay = (
-            df["시군구명"].astype(str) + " "
+            df["시도명"].astype(str) + " "
+            + df["시군구명"].astype(str) + " "
             + df["읍면동명"].astype(str) + " "
             + df["동리명"].astype(str)
         )

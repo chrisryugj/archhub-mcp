@@ -29,6 +29,35 @@ def _resp(j):
     return {"response": j}
 
 
+# ---- find_region ----
+
+def _bdong_client():
+    """네트워크 없이 find_region을 테스트하기 위한 합성 법정동 테이블 주입."""
+    c = ArchHubClient("k")
+    c._bdong = pd.DataFrame([
+        {"시도명": "서울특별시", "시군구명": "광진구", "읍면동명": "자양동", "동리명": "",
+         "법정동코드": "1121510500"},
+        {"시도명": "부산광역시", "시군구명": "해운대구", "읍면동명": "우동", "동리명": "",
+         "법정동코드": "2635010100"},
+    ])
+    return c
+
+
+def test_find_region_matches_on_sido_name():
+    # 시도명(서울)을 포함한 자연스러운 입력도 매칭되어야 함(회귀: haystack에 시도명 누락 버그)
+    c = _bdong_client()
+    res = c.find_region("서울 광진구 자양동")
+    assert len(res) == 1
+    assert res.iloc[0]["sigungu_code"] == "11215"
+    assert res.iloc[0]["bdong_code"] == "10500"
+
+
+def test_find_region_and_terms_narrow():
+    c = _bdong_client()
+    assert len(c.find_region("광진구")) == 1
+    assert len(c.find_region("서울 해운대구")) == 0  # 시도+시군구 AND 불일치
+
+
 # ---- 입력검증 ----
 
 def test_query_requires_service_key():

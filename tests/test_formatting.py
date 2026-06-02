@@ -114,6 +114,12 @@ def test_district_to_text_handles_empty_optional_columns():
     assert "총 2동" in out and "단독주택" in out
 
 
+def test_profile_to_text_notes_violation_unavailable():
+    # 위반건축물은 본 API 미제공 — 카드에 한계를 명시해 '미표시=위반없음' 오해 방지
+    out = profile_to_text(pd.DataFrame([{"건물명": "A"}]), total=1, max_buildings=5)
+    assert "위반건축물" in out and "제공하지 않습니다" in out
+
+
 def test_profile_to_text_shows_zoning():
     df = pd.DataFrame([{"건물명": "A"}])
     out = profile_to_text(df, total=1, max_buildings=5, zoning="제2종일반주거지역 · 지구단위계획구역")

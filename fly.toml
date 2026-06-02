@@ -12,7 +12,11 @@ primary_region = 'nrt'
   HOST = '0.0.0.0'
   PORT = '8000'
   ARCHHUB_KEY_EXPIRES = '2028-06-02'   # 공용키 만료일 → /health 만료 D-day 노출
+  ARCHHUB_DAILY_CALL_CAP = '9000'      # 일일 호출 캡 — 무인증 공개 remote의 공용키 고갈 방어(키 한도의 90% 선)
   # ARCHHUB_SERVICE_KEY 는 'fly secrets set' 으로 주입 (코드/설정에 평문 금지)
+  # 무인증이 기본 운영: claude.ai 웹 커넥터는 정적 Bearer 미지원(OAuth만)이라 ARCHHUB_MCP_TOKEN을
+  # 켜면 웹 연결이 깨진다. 공용키 방어는 이 캡 + fetch_all 가드로 한다.
+  # 단일 머신 필수: 캡 카운터가 프로세스 로컬이고 streamable-http 세션도 머신 간 공유 불가 → fly scale count 1 유지
 
 [http_service]
   internal_port = 8000

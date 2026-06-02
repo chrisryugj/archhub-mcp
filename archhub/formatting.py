@@ -177,6 +177,7 @@ def profile_to_text(
     parts.append("")
     parts.append("\n\n".join(building_card(row) for _, row in shown.iterrows()))
     parts.append("")
+    parts.append("※ 위반건축물 여부는 본 API에서 제공하지 않습니다(미표시가 '위반 없음'을 뜻하지 않음). 건축물대장 열람으로 별도 확인.")
     parts.append(SOURCE)
     return "\n".join(parts)
 
