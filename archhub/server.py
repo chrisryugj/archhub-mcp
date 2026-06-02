@@ -307,6 +307,7 @@ def old_buildings(
     d = df.copy()
     d[col] = d[col].astype(str).str.strip()
     d["경과연수"] = pd.to_numeric(d[col].map(_age_years), errors="coerce")  # 월·일 반영 만 경과연수
+    unknown = int(d["경과연수"].isna().sum())  # 사용승인일 미상/파싱불가 → 노후 판정 불가로 제외됨
     d = d.dropna(subset=["경과연수"])
     d["경과연수"] = d["경과연수"].astype(int)
     old = d[d["경과연수"] >= min_age_years].sort_values("경과연수", ascending=False)
@@ -318,7 +319,8 @@ def old_buildings(
     cols = [c for c in candidate if c in old.columns]
     out = old[cols].copy()
     out["사용승인일"] = out["사용승인일"].map(lambda v: _date(v) or v)  # YYYYMMDD → YYYY-MM-DD
-    note = f"표제부 {total}건{trunc} 중 경과 {min_age_years}년↑ {len(old)}건 (경과연수 내림차순)"
+    unknown_note = f" · 승인일 미상 {unknown}건 제외" if unknown else ""
+    note = f"표제부 {total}건{trunc} 중 경과 {min_age_years}년↑ {len(old)}건 (경과연수 내림차순){unknown_note}"
     return df_to_text(out, max_rows=top, note=note)
 
 

@@ -95,6 +95,8 @@ class ArchHubClient:
             "housing": HousingLicense(self.service_key or "x"),
         }
         self._bdong: Optional[pd.DataFrame] = None
+        # 페이지 반복 호출(fetch_all 최대 100p)에 keep-alive 재사용 — 페이지당 TLS 핸드셰이크 제거.
+        self._session = requests.Session()
         # data.go.kr 외부 호출 건수(프로세스 생존 동안). 공용키 일 한도 관측용.
         # 페이지당 1콜이라 fetch_all은 여러 번 증가. 정확한 잔여량은 API가 안 줘서 근사.
         self.api_calls = 0
@@ -242,6 +244,10 @@ class ArchHubClient:
             df = pd.DataFrame()
 
         if translate and len(df):
+            # 라이브러리 컬럼 매핑 재활용. 주의: PublicDataReader 1.1.1.post2는 기본개요의
+            # 건축구분코드명↔건축구분코드를 뒤바꿔 매핑한다(실측). permits_pipeline이 이 동작에
+            # 의존하므로 requirements.txt에서 버전을 핀 고정한다. 라이브러리가 swap을 고치면
+            # permits_pipeline의 건축구분 표기가 깨질 수 있어 상한(<1.2)으로 추가 방어.
             df = inst.translate_columns(df)
         return df, total
 
@@ -263,7 +269,7 @@ class ArchHubClient:
         self._enforce_daily_cap()
         self.api_calls += 1
         try:
-            r = requests.get(url, params=params, timeout=self.timeout)
+            r = self._session.get(url, params=params, timeout=self.timeout)
         except requests.Timeout:
             raise ArchHubError(
                 f"API 응답 시간 초과({self.timeout}s). 동 전체보다 번지(bun)를 지정하면 빨라집니다.",

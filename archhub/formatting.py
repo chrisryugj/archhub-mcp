@@ -8,6 +8,8 @@ from typing import Optional
 
 import pandas as pd
 
+from .errors import not_found
+
 SOURCE = "출처: 국토교통부 건축HUB (공공데이터포털 data.go.kr)"
 
 
@@ -175,8 +177,12 @@ def profile_to_text(
     if note:
         parts.append(note)
     parts.append("")
-    parts.append("\n\n".join(building_card(row) for _, row in shown.iterrows()))
+    cards = "\n\n".join(building_card(row) for _, row in shown.iterrows())
+    parts.append(cards)
     parts.append("")
+    if total > 1 and "(계산)" in cards:
+        # 건폐율/용적률 계산 fallback은 표제부 1행(동) 기준이라 다동 필지에서 필지 전체와 다를 수 있음
+        parts.append("※ 여러 동이 있는 필지에서 건폐율/용적률 (계산) 값은 해당 동 기준이며 필지 전체 합산이 아닙니다(표제부 기재값 우선).")
     parts.append("※ 위반건축물 여부는 본 API에서 제공하지 않습니다(미표시가 '위반 없음'을 뜻하지 않음). 건축물대장 열람으로 별도 확인.")
     parts.append(SOURCE)
     return "\n".join(parts)
@@ -358,7 +364,12 @@ def price_history_to_text(
     d = d.dropna(subset=["_price", "_year"])
     d = d[d["_price"] > 0]
     if len(d) == 0 or "관리건축물대장PK" not in d.columns:
-        return "공시가격(주택가격) 데이터 없음 (0건)\n\n" + SOURCE
+        # 행은 있었으나 유효 가격(>0)/PK가 없어 필터 후 0건 — 평문 대신 [NOT_FOUND]로
+        # 환각 방어 경고를 붙인다(server의 len(df)==0 가로채기가 못 잡는 경로).
+        return not_found(
+            "공시가격(주택가격) 시계열 없음 (유효 가격 0건)",
+            ["ji(부번) 조정", "공시가격이 없는 필지(비주거 등)일 수 있음"],
+        )
     d["_year"] = d["_year"].astype(int)
 
     units = []  # (최신가, 라벨, 추이문자열, 요약문자열)
@@ -400,6 +411,8 @@ def price_history_to_text(
         lines.append(f"  {summary}")
         lines.append(f"  추이: {trend}")
         lines.append("")
+    lines.append("※ 공시가격은 시세가 아닙니다(통상 시세의 60~70% 수준, 연도별 현실화율 정책 변동 포함). "
+                 "증감률·CAGR을 시세·실거래가 상승률로 해석하지 마세요.")
     lines.append(SOURCE)
     return "\n".join(lines)
 

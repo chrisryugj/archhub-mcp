@@ -120,6 +120,19 @@ def test_profile_to_text_notes_violation_unavailable():
     assert "위반건축물" in out and "제공하지 않습니다" in out
 
 
+def test_profile_multi_building_calc_note():
+    # 다동 필지 + 건폐율 계산값(미기재라 면적계산)이면 '동별 값' 주석을 붙인다 (M2)
+    df = pd.DataFrame([
+        {"건물명": "A동", "대지면적": "1000", "건축면적": "600"},  # 건폐율 60%(계산)
+        {"건물명": "B동", "대지면적": "1000", "건축면적": "300"},  # 건폐율 30%(계산)
+    ])
+    out = profile_to_text(df, total=2, max_buildings=5)
+    assert "(계산)" in out
+    assert "필지 전체 합산이 아닙니다" in out
+    # 단동이면 주석 없음
+    assert "필지 전체 합산이 아닙니다" not in profile_to_text(df.head(1), total=1, max_buildings=5)
+
+
 def test_profile_to_text_shows_zoning():
     df = pd.DataFrame([{"건물명": "A"}])
     out = profile_to_text(df, total=1, max_buildings=5, zoning="제2종일반주거지역 · 지구단위계획구역")
@@ -204,7 +217,23 @@ def test_price_history_top_units_truncates():
 
 def test_price_history_empty():
     out = price_history_to_text(pd.DataFrame(), total=0, top_units=10, bun="24")
-    assert "0건" in out and SOURCE in out
+    assert "[NOT_FOUND]" in out and "0건" in out
+
+
+def test_price_history_all_zero_prices_uses_not_found():
+    # 행은 있으나 유효 가격(>0)이 없어 필터 후 0건 → 평문이 아닌 [NOT_FOUND] + 환각경고 (M3)
+    df = pd.DataFrame([
+        {"관리건축물대장PK": 1, "주택가격": 0, "stdDay": "20200101"},
+        {"관리건축물대장PK": 1, "주택가격": "", "stdDay": "20210101"},
+    ])
+    out = price_history_to_text(df, total=2, top_units=10, bun="24")
+    assert "[NOT_FOUND]" in out and "추측" in out
+
+
+def test_price_history_warns_not_market_price():
+    # 공시가격≠시세 경고를 정상 출력 말미에 명시 (M1)
+    out = price_history_to_text(_price_df(), total=6, top_units=10, bun="24")
+    assert "공시가격은 시세가 아닙니다" in out
 
 
 def test_year_of():
@@ -290,6 +319,18 @@ def test_pipeline_only_in_progress_and_stages():
 def test_pipeline_since_year_filter():
     out = pipeline_to_text(_pipe_df(), total=3, since_year=2024, top=30)
     assert "미착공빌" in out and "진행중빌" not in out  # 2023허가 제외
+
+
+def test_pipeline_reads_swapped_kind_column():
+    # translate_columns swap 의존 고정 (M4): 실제 명칭은 '건축구분코드'에, 코드값(0100)은
+    # '건축구분코드명'에 들어온다. pipeline은 명칭을 읽고 코드값은 무시해야 한다.
+    # 라이브러리가 swap을 고치면 이 단정이 깨져 회귀를 알린다.
+    df = pd.DataFrame([{
+        "대지위치": "자양동 1-1", "건축구분코드": "신축", "건축구분코드명": "0100",
+        "주용도코드명": "공동주택", "건축허가일": "20240101", "실제착공일": " ", "사용승인일": " ",
+    }])
+    out = pipeline_to_text(df, total=1, top=30)
+    assert "신축" in out and "0100" not in out
 
 
 def test_df_to_text_empty_and_source():

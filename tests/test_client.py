@@ -121,7 +121,7 @@ def test_daily_cap_blocks_when_exceeded(monkeypatch):
     c = ArchHubClient("k")
     j = _resp({"header": {"resultCode": "00"},
                "body": {"totalCount": 1, "items": {"item": [{"a": 1}]}}})
-    monkeypatch.setattr(client_mod.requests, "get", lambda *a, **k: FakeResp(j))
+    monkeypatch.setattr(c._session, "get", lambda *a, **k: FakeResp(j))
     c._request_page("http://x", {})
     c._request_page("http://x", {})
     with pytest.raises(ArchHubError) as e:
@@ -135,7 +135,7 @@ def test_request_page_parses_list_items(monkeypatch):
     c = ArchHubClient("k")
     j = _resp({"header": {"resultCode": "00"},
                "body": {"totalCount": 2, "items": {"item": [{"a": 1}, {"a": 2}]}}})
-    monkeypatch.setattr(client_mod.requests, "get", lambda *a, **k: FakeResp(j))
+    monkeypatch.setattr(c._session, "get", lambda *a, **k: FakeResp(j))
     df, total = c._request_page("http://x", {})
     assert total == 2 and len(df) == 2
 
@@ -145,7 +145,7 @@ def test_request_page_empty_data_is_not_error(monkeypatch):
     c = ArchHubClient("k")
     j = _resp({"header": {"resultCode": "00"},
                "body": {"totalCount": 0, "items": {"item": []}}})
-    monkeypatch.setattr(client_mod.requests, "get", lambda *a, **k: FakeResp(j))
+    monkeypatch.setattr(c._session, "get", lambda *a, **k: FakeResp(j))
     df, total = c._request_page("http://x", {})
     assert total == 0 and len(df) == 0
 
@@ -154,7 +154,7 @@ def test_request_page_single_dict_item(monkeypatch):
     c = ArchHubClient("k")
     j = _resp({"header": {"resultCode": "00"},
                "body": {"totalCount": 1, "items": {"item": {"a": 1}}}})
-    monkeypatch.setattr(client_mod.requests, "get", lambda *a, **k: FakeResp(j))
+    monkeypatch.setattr(c._session, "get", lambda *a, **k: FakeResp(j))
     df, total = c._request_page("http://x", {})
     assert total == 1 and len(df) == 1
 
@@ -162,7 +162,7 @@ def test_request_page_single_dict_item(monkeypatch):
 def test_request_page_bad_result_code_raises(monkeypatch):
     c = ArchHubClient("k")
     j = _resp({"header": {"resultCode": "30", "resultMsg": "SERVICE KEY ERROR"}, "body": {}})
-    monkeypatch.setattr(client_mod.requests, "get", lambda *a, **k: FakeResp(j))
+    monkeypatch.setattr(c._session, "get", lambda *a, **k: FakeResp(j))
     with pytest.raises(ArchHubError) as e:
         c._request_page("http://x", {})
     assert e.value.code == API_ERROR
@@ -171,7 +171,7 @@ def test_request_page_bad_result_code_raises(monkeypatch):
 def test_request_page_non_json_raises(monkeypatch):
     # 인증실패 시 HTTP 401 text/plain 'Unauthorized' (실측) → 파싱실패 에러
     c = ArchHubClient("k")
-    monkeypatch.setattr(client_mod.requests, "get",
+    monkeypatch.setattr(c._session, "get",
                         lambda *a, **k: FakeResp(text="Unauthorized", status=401, raise_json=True))
     with pytest.raises(ArchHubError) as e:
         c._request_page("http://x", {})
@@ -185,7 +185,7 @@ def test_request_page_timeout_raises(monkeypatch):
     def boom(*a, **k):
         raise client_mod.requests.Timeout()
 
-    monkeypatch.setattr(client_mod.requests, "get", boom)
+    monkeypatch.setattr(c._session, "get", boom)
     with pytest.raises(ArchHubError) as e:
         c._request_page("http://x", {})
     assert e.value.code == API_ERROR
@@ -242,7 +242,7 @@ def test_api_calls_counts_external_requests(monkeypatch):
     assert c.api_calls == 0
     j = _resp({"header": {"resultCode": "00"},
                "body": {"totalCount": 1, "items": {"item": [{"a": 1}]}}})
-    monkeypatch.setattr(client_mod.requests, "get", lambda *a, **k: FakeResp(j))
+    monkeypatch.setattr(c._session, "get", lambda *a, **k: FakeResp(j))
     c._request_page("http://x", {})
     c._request_page("http://x", {})
     assert c.api_calls == 2  # 페이지(외부 호출)당 1 증가
