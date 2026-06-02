@@ -8,10 +8,10 @@
 archhub/
   __init__.py     # __version__
   __main__.py     # python -m archhub 진입점
-  server.py       # FastMCP 인스턴스 + 도구 5개 + /health,/ 라우트 + stdio/http main()
-  client.py       # ArchHubClient — 직접 REST 호출 + 법정동코드 캐시
+  server.py       # FastMCP 인스턴스 + 도구 7개 + /health,/ 라우트 + stdio/http main()
+  client.py       # ArchHubClient — 직접 REST 호출 + 법정동코드 캐시 + api_calls 카운터
   errors.py       # [NOT_FOUND]/[ERROR] 포맷 (환각 방지), 키 마스킹
-  formatting.py   # DataFrame → 텍스트 + 출처 명시
+  formatting.py   # DataFrame → 텍스트(종합카드·동단위통계) + 출처 명시
 ```
 
 ## 핵심 설계 결정

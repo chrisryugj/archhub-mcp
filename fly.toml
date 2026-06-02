@@ -11,6 +11,7 @@ primary_region = 'nrt'
   MCP_TRANSPORT = 'http'
   HOST = '0.0.0.0'
   PORT = '8000'
+  ARCHHUB_KEY_EXPIRES = '2028-06-02'   # 공용키 만료일 → /health 만료 D-day 노출
   # ARCHHUB_SERVICE_KEY 는 'fly secrets set' 으로 주입 (코드/설정에 평문 금지)
 
 [http_service]

@@ -66,6 +66,9 @@ class ArchHubClient:
             "housing": HousingLicense(self.service_key or "x"),
         }
         self._bdong: Optional[pd.DataFrame] = None
+        # data.go.kr 외부 호출 건수(프로세스 생존 동안). 공용키 일 한도 관측용.
+        # 페이지당 1콜이라 fetch_all은 여러 번 증가. 정확한 잔여량은 API가 안 줘서 근사.
+        self.api_calls = 0
 
     # ---- 지역코드 ----
 
@@ -173,6 +176,7 @@ class ArchHubClient:
 
     def _request_page(self, url: str, params: dict) -> tuple[pd.DataFrame, int]:
         """단일 페이지 요청 → (DataFrame, totalCount)."""
+        self.api_calls += 1
         try:
             r = requests.get(url, params=params, verify=False, timeout=self.timeout)
         except requests.Timeout:

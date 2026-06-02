@@ -3,6 +3,7 @@
 출처(국토교통부 건축HUB)를 항상 명시해 LLM이 데이터 근거를 사용자에게 전달하도록 한다.
 """
 
+import datetime
 from typing import Optional
 
 import pandas as pd
@@ -145,6 +146,83 @@ def profile_to_text(df: pd.DataFrame, total: int, max_buildings: int, note: str 
     parts.append("")
     parts.append(SOURCE)
     return "\n".join(parts)
+
+
+def _pct(n: int, total: int) -> str:
+    return f"{(n / total * 100) if total else 0.0:4.1f}%"
+
+
+def district_to_text(
+    df: pd.DataFrame, total: int, trunc: str = "",
+    min_age_years: int = 30, top_uses: int = 10,
+) -> str:
+    """법정동 표제부 전체를 받아 총괄·주용도별·연대별·노후도 분포로 집계."""
+    n = len(df)
+    area = pd.to_numeric(
+        df.get("연면적", pd.Series(dtype="object")).astype(str).str.replace(",", "").str.strip(),
+        errors="coerce",
+    )
+    floors = pd.to_numeric(df.get("지상층수", pd.Series(dtype="object")), errors="coerce")
+    appr = df.get("사용승인일", pd.Series(dtype="object")).astype(str).str.strip()
+    year = pd.to_numeric(appr.str[:4].where(appr.str.len() >= 4), errors="coerce")
+    age = datetime.date.today().year - year
+
+    lines = [f"[법정동 건축물 통계] 표제부 {total}건{trunc} 기준", ""]
+
+    # 총괄
+    summary = [f"총 {n:,}동"]
+    if area.notna().any():
+        summary.append(f"총 연면적 {area.sum():,.0f}㎡")
+    if floors.notna().any():
+        summary.append(f"평균 {floors.mean():.1f}층")
+    if age.notna().any():
+        summary.append(f"평균 경과 {age.mean():.0f}년")
+    lines.append("■ 총괄")
+    lines.append("  " + " · ".join(summary))
+
+    # 주용도별 (동수 상위)
+    use = df.get("주용도코드명")
+    if use is not None:
+        u = use.astype(str).str.strip().replace({"": "(미상)", "nan": "(미상)"})
+        grp = u.value_counts().head(top_uses)
+        lines.append("")
+        lines.append(f"■ 주용도별 (상위 {len(grp)})")
+        for name, cnt in grp.items():
+            a = area[u == name].sum() if area.notna().any() else 0
+            asuf = f" · 연면적 {a:,.0f}㎡" if a else ""
+            lines.append(f"  {name:<12} {cnt:>6,}동 ({_pct(cnt, n)}){asuf}")
+
+    # 사용승인 연대별
+    if year.notna().any():
+        decade = (year // 10 * 10).dropna().astype(int)
+        lines.append("")
+        lines.append("■ 사용승인 연대별")
+        for dec in sorted(decade.unique()):
+            cnt = int((decade == dec).sum())
+            lines.append(f"  {dec}s   {cnt:>6,}동 ({_pct(cnt, n)})")
+        unknown = int(year.isna().sum())
+        if unknown:
+            lines.append(f"  (미상) {unknown:>6,}동 ({_pct(unknown, n)})")
+
+    # 노후도 분포
+    if age.notna().any():
+        bins = [(0, 10), (10, 20), (20, 30), (30, 40), (40, 200)]
+        labels = ["10년 미만", "10~20년", "20~30년", "30~40년", "40년 이상"]
+        lines.append("")
+        lines.append("■ 노후도 분포 (사용승인 경과연수)")
+        for (lo, hi), lab in zip(bins, labels):
+            cnt = int(((age >= lo) & (age < hi)).sum())
+            mark = "  ⚠" if lo >= min_age_years else ""
+            lines.append(f"  {lab:<8} {cnt:>6,}동 ({_pct(cnt, n)}){mark}")
+        unknown = int(age.isna().sum())
+        if unknown:
+            lines.append(f"  (미상)   {unknown:>6,}동 ({_pct(unknown, n)})")
+        aged = int((age >= min_age_years).sum())
+        lines.append(f"  → 경과 {min_age_years}년↑ 합계 {aged:,}동 ({_pct(aged, n)})")
+
+    lines.append("")
+    lines.append(SOURCE)
+    return "\n".join(lines)
 
 
 def df_to_text(df: Optional[pd.DataFrame], max_rows: int = 50, note: str = "") -> str:

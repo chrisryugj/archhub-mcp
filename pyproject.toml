@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "archhub-mcp"
+version = "0.1.0"
+description = "국토교통부 건축HUB(공공데이터포털) → MCP 서버. 건축물대장·건축인허가·주택인허가 + 법정동코드 + 노후건축물/동단위 통계 분석."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Chris", email = "ryuseungin@naver.com" }]
+keywords = ["archhub", "건축", "건축물대장", "건축인허가", "국토교통부", "공공데이터", "mcp"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "fastmcp>=3.0",
+    "PublicDataReader>=1.1.1",
+    "pandas>=2.0",
+    "requests>=2.31",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.urls]
+Homepage = "https://github.com/chrisryugj/archhub-mcp"
+Repository = "https://github.com/chrisryugj/archhub-mcp"
+
+[project.scripts]
+archhub-mcp = "archhub.server:main"
+
+[tool.setuptools]
+packages = ["archhub"]

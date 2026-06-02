@@ -12,7 +12,7 @@
         "source": "github",
         "repo": "chrisryugj/archhub-mcp"
       },
-      "description": "국토교통부 건축HUB → MCP. 건축물대장·건축인허가·주택인허가 + 법정동코드 + 노후건축물 분석. URL만 등록하는 remote 커넥터",
+      "description": "국토교통부 건축HUB → MCP. 건축물대장·건축인허가·주택인허가 + 법정동코드 + 한 필지 종합카드 + 동 단위 통계 + 노후건축물 분석. URL만 등록하는 remote 커넥터",
       "version": "0.1.0",
       "author": { "name": "Chris" },
       "homepage": "https://github.com/chrisryugj/archhub-mcp",

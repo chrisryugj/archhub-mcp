@@ -153,3 +153,16 @@ def test_fetch_all_stops_when_collected_all(monkeypatch):
     monkeypatch.setattr(c, "_request_page", lambda url, params: (page, 250))
     df, total = c.query("ledger", "표제부", "1", "1", fetch_all=True, translate=False)
     assert total == 250 and len(df) == 300  # 100*3페이지 (got>=total에서 멈춤)
+
+
+# ---- API 호출 카운터(공용키 한도 관측용) ----
+
+def test_api_calls_counts_external_requests(monkeypatch):
+    c = ArchHubClient("k")
+    assert c.api_calls == 0
+    j = _resp({"header": {"resultCode": "00"},
+               "body": {"totalCount": 1, "items": {"item": [{"a": 1}]}}})
+    monkeypatch.setattr(client_mod.requests, "get", lambda *a, **k: FakeResp(j))
+    c._request_page("http://x", {})
+    c._request_page("http://x", {})
+    assert c.api_calls == 2  # 페이지(외부 호출)당 1 증가

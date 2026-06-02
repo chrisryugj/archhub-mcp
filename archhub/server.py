@@ -15,10 +15,22 @@ from starlette.responses import JSONResponse
 from . import __version__
 from .client import ArchHubClient, KINDS, LEDGER_TYPES, PERMIT_TYPES, HOUSING_TYPES
 from .errors import not_found, format_error
-from .formatting import df_to_text, profile_to_text
+from .formatting import df_to_text, profile_to_text, district_to_text, _date
 
 SERVICE_KEY = os.environ.get("ARCHHUB_SERVICE_KEY", "").strip()
+KEY_EXPIRES = os.environ.get("ARCHHUB_KEY_EXPIRES", "").strip()  # 공용키 만료일 YYYY-MM-DD(선택)
 client = ArchHubClient(SERVICE_KEY)
+
+
+def _key_expiry_days():
+    """공용키 만료까지 남은 일수. ARCHHUB_KEY_EXPIRES 미설정/형식오류면 None."""
+    if not KEY_EXPIRES:
+        return None
+    try:
+        exp = datetime.date.fromisoformat(KEY_EXPIRES)
+    except ValueError:
+        return None
+    return (exp - datetime.date.today()).days
 
 mcp = FastMCP(
     name="archhub",
@@ -240,8 +252,44 @@ def old_buildings(
     candidate = ["건물명", "도로명대지위치", "대지위치", "주용도코드명",
                  "사용승인일", "경과연수", "연면적", "지상층수", "세대수"]
     cols = [c for c in candidate if c in old.columns]
+    out = old[cols].copy()
+    out["사용승인일"] = out["사용승인일"].map(lambda v: _date(v) or v)  # YYYYMMDD → YYYY-MM-DD
     note = f"표제부 {total}건{trunc} 중 경과 {min_age_years}년↑ {len(old)}건 (경과연수 내림차순)"
-    return df_to_text(old[cols], max_rows=top, note=note)
+    return df_to_text(out, max_rows=top, note=note)
+
+
+@mcp.tool
+def district_stats(
+    sigungu_code: str,
+    bdong_code: str,
+    min_age_years: int = 30,
+    top_uses: int = 10,
+) -> str:
+    """법정동 단위 건축물 현황을 집계 통계로 조회한다 (동 전체 표제부 기반).
+
+    건축물대장 표제부 전체를 받아 ① 총괄(동수·총연면적·평균층수·평균경과연수)
+    ② 주용도별 분포 ③ 사용승인 연대별 분포 ④ 노후도 구간별 분포를 한 번에 집계한다.
+    개별 건물이 아니라 '동 전체 그림'이 필요할 때 쓴다. (도시계획·정비사업·지역분석용)
+    동 전체를 받으므로 응답이 다소 느릴 수 있다.
+
+    Args:
+        sigungu_code: 시군구 5자리 코드 (find_region으로 조회).
+        bdong_code: 읍면동 5자리 코드.
+        min_age_years: 노후 합계 판정 기준 경과연수(년). 기본 30.
+        top_uses: 주용도별 분포에서 표시할 상위 용도 수.
+    """
+    try:
+        df, total = client.query("ledger", "표제부", sigungu_code, bdong_code, fetch_all=True)
+    except Exception as e:
+        return format_error(e, "district_stats")
+    if len(df) == 0:
+        return not_found(
+            f"표제부 데이터 없음 (sigungu={sigungu_code}, bdong={bdong_code})",
+            ["find_region으로 코드 재확인"],
+        )
+    collected = len(df)
+    trunc = f" (응답 한도로 {collected}건만 집계)" if collected < total else ""
+    return district_to_text(df, total, trunc, min_age_years, top_uses)
 
 
 # ---- HTTP 라우트 ----
@@ -249,7 +297,18 @@ def old_buildings(
 
 @mcp.custom_route("/health", methods=["GET"])
 async def health(request):
-    return JSONResponse({"status": "ok", "version": __version__, "key_loaded": bool(SERVICE_KEY)})
+    info = {
+        "status": "ok",
+        "version": __version__,
+        "key_loaded": bool(SERVICE_KEY),
+        "api_calls": client.api_calls,  # 프로세스 생존 동안 data.go.kr 호출수(공용키 한도 관측용)
+    }
+    days = _key_expiry_days()
+    if days is not None:
+        info["key_expires"] = KEY_EXPIRES
+        info["key_expires_in_days"] = days
+        info["key_expiry_warning"] = days <= 30  # 만료 임박 경고
+    return JSONResponse(info)
 
 
 @mcp.custom_route("/", methods=["GET"])
@@ -260,7 +319,7 @@ async def root(request):
         "transport": "streamable-http",
         "endpoint": "/mcp",
         "tools": ["find_region", "building_profile", "building_ledger",
-                  "building_permit", "housing_permit", "old_buildings"],
+                  "building_permit", "housing_permit", "old_buildings", "district_stats"],
         "source": "국토교통부 건축HUB (data.go.kr)",
     })
 
