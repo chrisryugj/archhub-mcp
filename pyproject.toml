@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "archhub-mcp"
-version = "0.2.1"
+version = "0.3.0"
 description = "국토교통부 건축HUB(공공데이터포털) → MCP 서버. 건축물대장·건축인허가·주택인허가 + 법정동코드 + 노후건축물/동단위 통계 분석."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -18,8 +18,9 @@ classifiers = [
 ]
 dependencies = [
     "fastmcp>=3.0",
-    # <1.2 상한: permits_pipeline이 기본개요 컬럼 swap 동작에 의존(client.query 주석 참고).
-    "PublicDataReader>=1.1.1,<1.2",
+    # 기본개요 컬럼 swap(건축구분코드명↔건축구분코드)은 formatting._permit_kind가
+    # 자가 감지·보정하므로 라이브러리가 swap을 고쳐도 안전 — 버전 상한 불필요.
+    "PublicDataReader>=1.1.1",
     "pandas>=2.0",
     "requests>=2.31",
 ]
@@ -36,3 +37,11 @@ archhub-mcp = "archhub.server:main"
 
 [tool.setuptools]
 packages = ["archhub"]
+
+[tool.pytest.ini_options]
+filterwarnings = [
+    # pandas 2.x의 chained-assignment 감지는 sys.getrefcount 휴리스틱 — Python 3.13+
+    # deferred refcounting 환경에서 일반 컬럼 할당(.copy()된 로컬에 d["col"]=...)도 오탐.
+    # 프로덕션 런타임은 python:3.11-slim(Dockerfile)이라 미발생.
+    "ignore:ChainedAssignmentError:FutureWarning",
+]

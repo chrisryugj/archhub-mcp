@@ -4,7 +4,7 @@ import pandas as pd
 
 from archhub.formatting import (
     _num, _g, _date, _area, _eok, _year_of, _pct, _floor_sort_key, _sample_trend,
-    building_card, profile_to_text, district_to_text, floors_to_text,
+    _permit_kind, building_card, profile_to_text, district_to_text, floors_to_text,
     price_history_to_text, demolitions_to_text, pipeline_to_text, df_to_text, SOURCE,
 )
 import datetime
@@ -165,6 +165,47 @@ def test_floors_to_text_stacks_sorts_and_merges():
     assert "■ 층별 구성 — 테스트빌" in out and SOURCE in out
 
 
+def test_floors_to_text_splits_multi_dong():
+    # 다동 필지: 동 구분 없이 층을 합산하면 101동 1층 + 102동 1층이 한 줄로 합쳐진다(버그) →
+    # 동명칭이 2개 이상이면 동별 섹션으로 분리한다 (#A2)
+    df = pd.DataFrame([
+        {"건물명": "쌍둥이빌", "동명칭": "101동", "층구분코드명": "지상", "층번호": "1",
+         "주용도코드명": "공동주택", "면적": "100"},
+        {"건물명": "쌍둥이빌", "동명칭": "101동", "층구분코드명": "지상", "층번호": "2",
+         "주용도코드명": "공동주택", "면적": "100"},
+        {"건물명": "쌍둥이빌", "동명칭": "102동", "층구분코드명": "지상", "층번호": "1",
+         "주용도코드명": "공동주택", "면적": "300"},
+    ])
+    out = floors_to_text(df, total=3)
+    assert "[101동]" in out and "[102동]" in out
+    # 동별 면적이 합산되지 않는다: 101동 1층 100㎡, 102동 1층 300㎡ (합산 400㎡ 없음)
+    assert "100㎡" in out and "300㎡" in out
+    assert "400" not in out
+    # 단동이면 기존 동작(섹션 없음)
+    single = floors_to_text(df[df["동명칭"] == "101동"], total=2)
+    assert "[101동]" not in single and "총 2개 층" in single
+
+
+def test_floors_to_text_appends_etc_use():
+    # 기타용도가 있으면 주용도 옆에 병기 (예: 제2종근린생활시설(고시원))
+    df = pd.DataFrame([
+        {"건물명": "A", "층구분코드명": "지상", "층번호": "2",
+         "주용도코드명": "제2종근린생활시설", "기타용도": "고시원", "면적": "150"},
+        {"건물명": "A", "층구분코드명": "지상", "층번호": "1",
+         "주용도코드명": "제1종근린생활시설", "기타용도": "", "면적": "150"},
+    ])
+    out = floors_to_text(df, total=2)
+    assert "제2종근린생활시설(고시원) 150㎡" in out
+    assert "제1종근린생활시설 150㎡" in out  # 기타용도 없으면 병기 없음
+
+
+def test_floors_to_text_survives_missing_use_column():
+    # 주용도코드명 컬럼이 아예 없어도 죽지 않는다(결측 방어 통일)
+    df = pd.DataFrame([{"건물명": "A", "층구분코드명": "지상", "층번호": "1", "면적": "100"}])
+    out = floors_to_text(df, total=1)
+    assert "1층" in out and "100㎡" in out
+
+
 def test_eok_format():
     assert _eok("429000000") == "4.29억"
     assert _eok(245000000) == "2.45억"
@@ -291,6 +332,24 @@ def test_demolitions_since_year_filter():
     assert "2015년↑ 1건" in out
 
 
+def test_demolitions_future_year_typo_flagged_and_filtered():
+    # 미래연도 오타(2108): since_year 필터를 '최근'으로 통과하면 안 되고, 출력 시 의심 표기 (#A11)
+    df = pd.concat([_demo_df(), pd.DataFrame([
+        {"대지위치": "서울 광진구 자양동 7-7", "철거멸실구분코드명": "철거",
+         "철거시작일": "21080607", "철거종료일": " ", "철거멸실일": " ",
+         "연면적(㎡)": "50", "주용도코드명": "단독주택", "구조코드명": "조적조",
+         "천장재함유유무": "0", "단열재함유유무": "0", "지붕재함유유무": "0",
+         "보온재함유유무": "0", "바닥재함유유무": "0", "기타함유유무": "0"},
+    ])], ignore_index=True)
+    # since_year 지정 시: 2108은 2015년↑ 필터를 통과하지 못한다(연도 오타 의심 처리)
+    out = demolitions_to_text(df, total=3, since_year=2015, top=30)
+    assert "7-7" not in out and "2108" not in out
+    # 전체 조회 시: 표시는 하되 의심 표기 + 최근순 1위를 먹지 않음(강등)
+    out_all = demolitions_to_text(df, total=3, top=30)
+    assert "(연도 오타 의심)" in out_all
+    assert out_all.index("2-2") < out_all.index("7-7")  # 2019건이 2108 오타보다 먼저
+
+
 def _pipe_df():
     return pd.DataFrame([
         {"대지위치": "자양동 1-1", "건물명": "진행중빌", "건축구분코드": "신축",
@@ -321,16 +380,50 @@ def test_pipeline_since_year_filter():
     assert "미착공빌" in out and "진행중빌" not in out  # 2023허가 제외
 
 
-def test_pipeline_reads_swapped_kind_column():
-    # translate_columns swap 의존 고정 (M4): 실제 명칭은 '건축구분코드'에, 코드값(0100)은
-    # '건축구분코드명'에 들어온다. pipeline은 명칭을 읽고 코드값은 무시해야 한다.
-    # 라이브러리가 swap을 고치면 이 단정이 깨져 회귀를 알린다.
-    df = pd.DataFrame([{
-        "대지위치": "자양동 1-1", "건축구분코드": "신축", "건축구분코드명": "0100",
-        "주용도코드명": "공동주택", "건축허가일": "20240101", "실제착공일": " ", "사용승인일": " ",
-    }])
-    out = pipeline_to_text(df, total=1, top=30)
+def test_pipeline_kind_swap_self_correction_both_ways():
+    # swap 자가 보정: 두 컬럼 중 숫자(코드값)가 아닌 쪽을 명칭으로 읽는다.
+    # 라이브러리가 swap을 고치든 말든 양방향 모두 '신축'을 표기해야 한다.
+    base = {"대지위치": "자양동 1-1", "주용도코드명": "공동주택",
+            "건축허가일": f"{datetime.date.today().year}0101", "실제착공일": " ", "사용승인일": " "}
+    # (1) swap 있는 환경(PublicDataReader 1.1.x 실측): 명칭이 '건축구분코드'에
+    swapped = pd.DataFrame([{**base, "건축구분코드": "신축", "건축구분코드명": "0100"}])
+    out = pipeline_to_text(swapped, total=1, top=30)
     assert "신축" in out and "0100" not in out
+    # (2) swap 없는 환경(라이브러리 수정 후): 명칭이 '건축구분코드명'에
+    fixed = pd.DataFrame([{**base, "건축구분코드명": "신축", "건축구분코드": "0100"}])
+    out2 = pipeline_to_text(fixed, total=1, top=30)
+    assert "신축" in out2 and "0100" not in out2
+
+
+def test_permit_kind_helper():
+    assert _permit_kind(pd.Series({"건축구분코드": "신축", "건축구분코드명": "0100"})) == "신축"
+    assert _permit_kind(pd.Series({"건축구분코드명": "대수선", "건축구분코드": "0300"})) == "대수선"
+    assert _permit_kind(pd.Series({"건축구분코드명": "0100", "건축구분코드": "0100"})) is None  # 둘 다 코드값
+    assert _permit_kind(pd.Series({"대지위치": "x"})) is None  # 컬럼 자체 없음
+
+
+def test_pipeline_separates_stale_unstarted_permits():
+    # 허가 후 5년 경과 + 미착공 = 장기 미착공(실효 가능성) — 진행중에서 분리 집계 (#A3)
+    yr = datetime.date.today().year
+    df = pd.DataFrame([
+        {"대지위치": "자양동 1-1", "건물명": "최근미착공빌", "건축구분코드": "신축",
+         "주용도코드명": "업무시설", "건축허가일": f"{yr}0102", "실제착공일": " ", "사용승인일": " "},
+        {"대지위치": "자양동 2-2", "건물명": "장기미착공빌", "건축구분코드": "신축",
+         "주용도코드명": "업무시설", "건축허가일": f"{yr - 20}0101", "실제착공일": " ", "사용승인일": " "},
+        {"대지위치": "자양동 3-3", "건물명": "장기공사중빌", "건축구분코드": "신축",
+         "주용도코드명": "업무시설", "건축허가일": f"{yr - 20}0101", "실제착공일": f"{yr - 19}0101", "사용승인일": " "},
+    ])
+    out = pipeline_to_text(df, total=3, top=30)
+    assert "진행중(사용승인 전) 2건" in out          # 장기미착공빌 분리, 착공한 건은 잔류
+    assert "장기 미착공" in out and "실효 가능성" in out and "1건" in out
+    assert "장기미착공빌" not in out                 # 목록에서 제외
+    assert "최근미착공빌" in out and "장기공사중빌" in out
+    assert "허가가 실효되었을 수 있음" in out         # 해석 주의 경고
+
+
+def test_pipeline_stale_warning_always_present():
+    out = pipeline_to_text(_pipe_df(), total=3, top=30)
+    assert "허가가 실효되었을 수 있음" in out
 
 
 def test_df_to_text_empty_and_source():

@@ -58,6 +58,14 @@ def test_find_region_and_terms_narrow():
     assert len(c.find_region("서울 해운대구")) == 0  # 시도+시군구 AND 불일치
 
 
+def test_find_region_regex_special_chars_no_crash():
+    # 검색어가 정규식으로 해석되면 괄호·별표 등에서 re.error 크래시 → regex=False 리터럴 매칭
+    c = _bdong_client()
+    assert len(c.find_region("자양동(")) == 0   # 크래시 없이 0건
+    assert len(c.find_region("서울 *")) == 0
+    assert len(c.find_region("자양동")) == 1    # 정상 검색은 그대로
+
+
 # ---- 입력검증 ----
 
 def test_query_requires_service_key():
@@ -84,6 +92,25 @@ def test_query_rejects_malformed_codes(sg, bd):
     with pytest.raises(ArchHubError) as e:
         ArchHubClient("k").query("ledger", "표제부", sg, bd)
     assert e.value.code == INVALID_PARAM
+
+
+def test_query_rejects_fullwidth_digit_codes():
+    # 전각 숫자('１１２１５')는 str.isdigit()=True지만 API에선 무효 → isascii 동시 검사로 차단
+    with pytest.raises(ArchHubError) as e:
+        ArchHubClient("k").query("ledger", "표제부", "１１２１５", "10500")
+    assert e.value.code == INVALID_PARAM
+
+
+def test_query_rejects_page_over_limit(monkeypatch):
+    # 100페이지 초과는 조용한 클램프 대신 명시 에러(잘못된 페이지를 100페이지 결과로 오인 방지)
+    c = ArchHubClient("k")
+    monkeypatch.setattr(c, "_request_page", lambda url, params: (pd.DataFrame([{"x": 1}]), 1))
+    with pytest.raises(ArchHubError) as e:
+        c.query("ledger", "표제부", "11215", "10500", page_no=101, translate=False)
+    assert e.value.code == INVALID_PARAM
+    # 경계값 100은 허용
+    df, _ = c.query("ledger", "표제부", "11215", "10500", page_no=100, translate=False)
+    assert len(df) == 1
 
 
 def test_query_upgrades_http_to_https(monkeypatch):
@@ -117,15 +144,16 @@ def test_fetch_all_stops_at_max_pages(monkeypatch):
 
 def test_daily_cap_blocks_when_exceeded(monkeypatch):
     # #1: 일일 호출 캡 초과 시 EXTERNAL_API_ERROR로 차단
+    # (페이지마다 다른 pageNo를 줘 응답 캐시를 우회 — 외부 호출 3회 강제)
     monkeypatch.setattr(client_mod, "DAILY_CALL_CAP", 2)
     c = ArchHubClient("k")
     j = _resp({"header": {"resultCode": "00"},
                "body": {"totalCount": 1, "items": {"item": [{"a": 1}]}}})
     monkeypatch.setattr(c._session, "get", lambda *a, **k: FakeResp(j))
-    c._request_page("http://x", {})
-    c._request_page("http://x", {})
+    c._request_page("http://x", {"pageNo": 1})
+    c._request_page("http://x", {"pageNo": 2})
     with pytest.raises(ArchHubError) as e:
-        c._request_page("http://x", {})
+        c._request_page("http://x", {"pageNo": 3})
     assert e.value.code == API_ERROR
 
 
@@ -243,6 +271,74 @@ def test_api_calls_counts_external_requests(monkeypatch):
     j = _resp({"header": {"resultCode": "00"},
                "body": {"totalCount": 1, "items": {"item": [{"a": 1}]}}})
     monkeypatch.setattr(c._session, "get", lambda *a, **k: FakeResp(j))
-    c._request_page("http://x", {})
-    c._request_page("http://x", {})
+    c._request_page("http://x", {"pageNo": 1})
+    c._request_page("http://x", {"pageNo": 2})  # 다른 페이지 → 캐시 미스 → 외부 호출
     assert c.api_calls == 2  # 페이지(외부 호출)당 1 증가
+
+
+# ---- 응답 TTL 캐시 ----
+
+def _ok_resp(n=1, total=None):
+    return _resp({"header": {"resultCode": "00"},
+                  "body": {"totalCount": total if total is not None else n,
+                           "items": {"item": [{"a": i} for i in range(n)]}}})
+
+
+def test_cache_hit_skips_external_call(monkeypatch):
+    # 동일 키 재요청은 캐시에서 응답 — 외부 호출·일일 캡 미산입
+    c = ArchHubClient("k")
+    monkeypatch.setattr(c._session, "get", lambda *a, **k: FakeResp(_ok_resp(2)))
+    df1, t1 = c._request_page("http://x", {"pageNo": 1})
+    df2, t2 = c._request_page("http://x", {"pageNo": 1})
+    assert c.api_calls == 1                  # 두 번째는 캐시 히트
+    assert t1 == t2 == 2 and len(df2) == 2
+    assert df1.equals(df2)
+
+
+def test_cache_hit_not_counted_in_daily_cap(monkeypatch):
+    # 캐시 히트는 일일 캡 카운트에 미산입 — 캡 1이어도 같은 키 반복은 통과
+    monkeypatch.setattr(client_mod, "DAILY_CALL_CAP", 1)
+    c = ArchHubClient("k")
+    monkeypatch.setattr(c._session, "get", lambda *a, **k: FakeResp(_ok_resp(1)))
+    c._request_page("http://x", {"pageNo": 1})
+    c._request_page("http://x", {"pageNo": 1})  # 캐시 히트 → 캡 초과 아님
+    assert c._calls_today == 1
+
+
+def test_cache_expires_after_ttl(monkeypatch):
+    c = ArchHubClient("k")
+    c._cache.ttl = -1  # 즉시 만료
+    monkeypatch.setattr(c._session, "get", lambda *a, **k: FakeResp(_ok_resp(1)))
+    c._request_page("http://x", {"pageNo": 1})
+    c._request_page("http://x", {"pageNo": 1})
+    assert c.api_calls == 2  # 만료 후 재요청
+
+
+def test_cache_does_not_store_empty_results(monkeypatch):
+    # 빈 결과(일시 장애 가능)는 캐시하지 않음 — 다음 요청은 다시 외부 호출
+    c = ArchHubClient("k")
+    j = _resp({"header": {"resultCode": "00"},
+               "body": {"totalCount": 0, "items": {"item": []}}})
+    monkeypatch.setattr(c._session, "get", lambda *a, **k: FakeResp(j))
+    c._request_page("http://x", {"pageNo": 1})
+    c._request_page("http://x", {"pageNo": 1})
+    assert c.api_calls == 2
+
+
+def test_cache_key_excludes_service_key(monkeypatch):
+    # serviceKey만 다른 동일 조회는 같은 캐시 항목 사용(키는 캐시 키에서 제외)
+    c = ArchHubClient("k")
+    monkeypatch.setattr(c._session, "get", lambda *a, **k: FakeResp(_ok_resp(1)))
+    c._request_page("http://x", {"pageNo": 1, "serviceKey": "A"})
+    c._request_page("http://x", {"pageNo": 1, "serviceKey": "B"})
+    assert c.api_calls == 1
+
+
+def test_ttl_cache_lru_eviction():
+    cache = client_mod._TTLCache(maxsize=2, ttl=3600)
+    cache.set("a", 1)
+    cache.set("b", 2)
+    assert cache.get("a") == 1   # a를 최근 사용으로 갱신
+    cache.set("c", 3)            # maxsize 초과 → 가장 오래 안 쓴 b 퇴출
+    assert cache.get("b") is None
+    assert cache.get("a") == 1 and cache.get("c") == 3

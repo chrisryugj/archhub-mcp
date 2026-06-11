@@ -9,8 +9,10 @@ requests에 timeout이 없어 MCP(빠른 응답)에 부적합하다. 따라서 H
 
 import datetime
 import json
+import logging
 import os
 import time
+from collections import OrderedDict
 from pathlib import Path
 from typing import Optional
 
@@ -23,6 +25,10 @@ from PublicDataReader import (
 )
 
 from .errors import ArchHubError, NO_KEY, INVALID_PARAM, API_ERROR
+
+# stderr 전용 로거 — stdout은 stdio MCP의 JSON-RPC 스트림이라 절대 오염 금지.
+# 핸들러 설정(basicConfig)은 server.main()에서 1회 수행한다.
+logger = logging.getLogger("archhub")
 
 # 조회 유형(소유자 제외 — 개인정보·별도 엔드포인트라 MVP 범위 밖)
 LEDGER_TYPES = [
@@ -57,6 +63,11 @@ MAX_FETCH_ROWS = 10000
 MAX_FETCH_PAGES = 100               # 100건/page → 행 상한과 정합(폭주 페이지 루프 차단)
 FETCH_ALL_DEADLINE_S = 60           # 동 전체 수집 총 시간 상한(초) — 워커 장시간 점유 방지
 
+# 응답 캐시(TTL+LRU): 건축물대장은 갱신 주기가 길어(일 단위) 6시간 캐시가 안전하다.
+# 같은 페이지 재요청 시 외부 API 호출·일일 캡 소모를 모두 절약한다.
+CACHE_TTL_S = 6 * 3600
+CACHE_MAX_ENTRIES = 512
+
 # 공용키 일일 호출 캡. 공공데이터포털 일 한도 보호용. 0(기본)이면 미적용.
 # 운영(공개 remote)에서는 키 한도에 맞춰 ARCHHUB_DAILY_CALL_CAP을 설정 권장.
 # 주의: 카운터는 프로세스 로컬이라 머신을 2대 이상으로 스케일하면 실효 한도 = 머신수×CAP
@@ -73,11 +84,41 @@ BDONG_CACHE_PATH = Path(
 BDONG_FETCH_TIMEOUT = 30
 
 
+class _TTLCache:
+    """in-memory TTL+LRU 캐시 (표준 라이브러리만 — OrderedDict 기반, 신규 의존성 금지).
+
+    maxsize 초과 시 가장 오래 안 쓴 항목부터 제거(LRU). TTL 경과 항목은 get 시 폐기.
+    """
+
+    def __init__(self, maxsize: int = CACHE_MAX_ENTRIES, ttl: float = CACHE_TTL_S):
+        self.maxsize = maxsize
+        self.ttl = ttl
+        self._d: OrderedDict = OrderedDict()
+
+    def get(self, key):
+        item = self._d.get(key)
+        if item is None:
+            return None
+        ts, val = item
+        if time.monotonic() - ts > self.ttl:
+            del self._d[key]  # 만료 — 폐기
+            return None
+        self._d.move_to_end(key)  # LRU 갱신
+        return val
+
+    def set(self, key, val) -> None:
+        self._d[key] = (time.monotonic(), val)
+        self._d.move_to_end(key)
+        while len(self._d) > self.maxsize:
+            self._d.popitem(last=False)
+
+
 def _validate_codes(sigungu_code, bdong_code) -> None:
     """sigungu_code/bdong_code가 5자리 숫자인지 검증(외부 API 호출 전 차단)."""
     for name, v in (("sigungu_code", sigungu_code), ("bdong_code", bdong_code)):
         s = str(v).strip()
-        if not (s.isdigit() and len(s) == 5):
+        # isascii 동시 검사: 전각 숫자('１１２１５')는 isdigit=True지만 API에선 무효
+        if not (s.isascii() and s.isdigit() and len(s) == 5):
             raise ArchHubError(
                 f"{name}는 5자리 숫자여야 합니다(받음: '{v}'). find_region으로 코드를 확인하세요.",
                 code=INVALID_PARAM,
@@ -97,6 +138,8 @@ class ArchHubClient:
         self._bdong: Optional[pd.DataFrame] = None
         # 페이지 반복 호출(fetch_all 최대 100p)에 keep-alive 재사용 — 페이지당 TLS 핸드셰이크 제거.
         self._session = requests.Session()
+        # 응답 페이지 TTL 캐시 — 동일 조회 반복 시 외부 호출·일일 캡 절약.
+        self._cache = _TTLCache()
         # data.go.kr 외부 호출 건수(프로세스 생존 동안). 공용키 일 한도 관측용.
         # 페이지당 1콜이라 fetch_all은 여러 번 증가. 정확한 잔여량은 API가 안 줘서 근사.
         self.api_calls = 0
@@ -154,12 +197,12 @@ class ArchHubClient:
         )
         mask = pd.Series([True] * len(df), index=df.index)
         for term in keyword.split():
-            mask &= hay.str.contains(term, na=False)
-        res = df[mask].copy()
+            # regex=False: 사용자 검색어가 정규식으로 해석되면 괄호 등에서 re.error 크래시
+            mask &= hay.str.contains(term, na=False, regex=False)
+        res = df[mask]
         code = res["법정동코드"].astype(str)
-        res["sigungu_code"] = code.str[:5]
-        res["bdong_code"] = code.str[5:]
-        return res
+        # assign: 새 DataFrame 반환 — pandas 3.0 Copy-on-Write에서 chained assignment 무동작 회피
+        return res.assign(sigungu_code=code.str[:5], bdong_code=code.str[5:])
 
     # ---- 데이터 조회 ----
 
@@ -202,7 +245,14 @@ class ArchHubClient:
         # 건축HUB 엔드포인트는 https를 제공한다. 평문 http면 키·응답이 노출되므로 강제 승격.
         url = inst.meta_dict[type_name]["url"].replace("http://", "https://", 1)
         rows = min(max(int(num_rows), 1), MAX_NUM_ROWS)
-        page_no = min(max(int(page_no), 1), MAX_FETCH_PAGES)
+        page_no = max(int(page_no), 1)
+        if page_no > MAX_FETCH_PAGES:
+            # 조용한 클램프 금지 — 사용자가 100페이지 결과를 101페이지 결과로 오인하게 된다
+            raise ArchHubError(
+                f"page는 1~{MAX_FETCH_PAGES} 범위여야 합니다(받음: {page_no}). "
+                f"페이지당 최대 {MAX_NUM_ROWS}건이므로 그 이상은 bun(번지)으로 좁혀 조회하세요.",
+                code=INVALID_PARAM,
+            )
 
         base_params = {
             "serviceKey": self.service_key,
@@ -232,9 +282,13 @@ class ArchHubClient:
             if got >= total or len(sub) == 0:
                 break
             if got >= MAX_FETCH_ROWS or page >= MAX_FETCH_PAGES:
-                break  # 행/페이지 상한 도달 — 일부만 수집(호출측이 len(df)<total로 감지)
+                # 행/페이지 상한 도달 — 일부만 수집(호출측이 len(df)<total로 감지)
+                logger.warning("fetch_all 절단(행/페이지 상한): %d/%d건 수집 (url=%s)", got, total, url)
+                break
             if time.monotonic() >= deadline:
-                break  # 총 데드라인 초과 — 워커 장시간 점유 방지
+                # 총 데드라인 초과 — 워커 장시간 점유 방지
+                logger.warning("fetch_all 절단(데드라인 %ds): %d/%d건 수집 (url=%s)", FETCH_ALL_DEADLINE_S, got, total, url)
+                break
             page += 1
             time.sleep(0.1)  # 과도한 연속요청 방지(페이지당 100건이라 호출 잦음)
 
@@ -245,9 +299,9 @@ class ArchHubClient:
 
         if translate and len(df):
             # 라이브러리 컬럼 매핑 재활용. 주의: PublicDataReader 1.1.1.post2는 기본개요의
-            # 건축구분코드명↔건축구분코드를 뒤바꿔 매핑한다(실측). permits_pipeline이 이 동작에
-            # 의존하므로 requirements.txt에서 버전을 핀 고정한다. 라이브러리가 swap을 고치면
-            # permits_pipeline의 건축구분 표기가 깨질 수 있어 상한(<1.2)으로 추가 방어.
+            # 건축구분코드명↔건축구분코드를 뒤바꿔 매핑한다(실측). 호출측(formatting._permit_kind)이
+            # 값이 숫자(코드값)인지로 swap을 자가 감지해 보정하므로, 라이브러리가 swap을
+            # 고쳐도 깨지지 않는다(버전 상한 불필요).
             df = inst.translate_columns(df)
         return df, total
 
@@ -259,23 +313,37 @@ class ArchHubClient:
             self._calls_today = 0
         self._calls_today += 1
         if DAILY_CALL_CAP and self._calls_today > DAILY_CALL_CAP:
+            logger.warning("일일 호출 캡 도달: %d건 (오늘 %d번째 요청 차단)", DAILY_CALL_CAP, self._calls_today)
             raise ArchHubError(
                 f"오늘 공용키 호출 한도({DAILY_CALL_CAP}건)를 초과했습니다. 잠시 후/내일 다시 시도하세요.",
                 code=API_ERROR,
             )
 
     def _request_page(self, url: str, params: dict) -> tuple[pd.DataFrame, int]:
-        """단일 페이지 요청 → (DataFrame, totalCount)."""
+        """단일 페이지 요청 → (DataFrame, totalCount). 결과는 TTL 캐시(6시간)한다.
+
+        캐시 키 = url(조회 종류·유형 식별) + serviceKey 제외 파라미터(지역코드·번지·페이지 등).
+        캐시 히트는 외부 호출이 아니므로 일일 캡·api_calls에 미산입.
+        빈 결과는 캐시하지 않는다(일시 장애가 6시간 고착되는 것 방지).
+        """
+        cache_key = (url, tuple(sorted((k, str(v)) for k, v in params.items() if k != "serviceKey")))
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            df, total = cached
+            return df.copy(), total  # 호출측 변형이 캐시를 오염시키지 않도록 사본 반환
+
         self._enforce_daily_cap()
         self.api_calls += 1
         try:
             r = self._session.get(url, params=params, timeout=self.timeout)
         except requests.Timeout:
+            logger.warning("외부 API 시간 초과(%ds): %s", self.timeout, url)
             raise ArchHubError(
                 f"API 응답 시간 초과({self.timeout}s). 동 전체보다 번지(bun)를 지정하면 빨라집니다.",
                 code=API_ERROR,
             )
         except requests.RequestException as e:
+            logger.warning("외부 API 요청 실패: %s (url=%s)", e, url)
             raise ArchHubError(f"API 요청 실패: {e}", code=API_ERROR)
 
         try:
@@ -296,11 +364,12 @@ class ArchHubClient:
         body = resp.get("body", {})
         total = int(body.get("totalCount") or 0)
         items = body.get("items")
-        if not items:
-            return pd.DataFrame(), total
-        item = items.get("item") if isinstance(items, dict) else items
+        item = (items.get("item") if isinstance(items, dict) else items) if items else None
         if item is None:
-            return pd.DataFrame(), total
+            return pd.DataFrame(), total  # 빈 결과는 캐시하지 않음
         if isinstance(item, dict):
             item = [item]
-        return pd.DataFrame(item), total
+        df = pd.DataFrame(item)
+        if len(df):
+            self._cache.set(cache_key, (df, total))
+        return df, total

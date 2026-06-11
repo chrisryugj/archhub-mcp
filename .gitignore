@@ -6,3 +6,4 @@ __pycache__/
 venv/
 *.log
 _verify*.py
+archhub_mcp.egg-info/

@@ -6,7 +6,9 @@ stdio 모드(로컬 Claude Desktop/Code)와 streamable-http 모드(fly.io remote
 
 import argparse
 import datetime
+import logging
 import os
+import sys
 from pathlib import Path
 
 import pandas as pd
@@ -18,7 +20,8 @@ from .client import ArchHubClient, KINDS, LEDGER_TYPES, PERMIT_TYPES, HOUSING_TY
 from .errors import not_found, format_error
 from .formatting import (
     df_to_text, profile_to_text, district_to_text, floors_to_text,
-    price_history_to_text, demolitions_to_text, pipeline_to_text, _date, _age_years,
+    price_history_to_text, demolitions_to_text, pipeline_to_text, seismic_to_text,
+    _date, _age_years,
 )
 
 
@@ -29,7 +32,10 @@ def _load_env_local() -> None:
     처리(로컬 편의 한정 — 운영은 fly secrets/환경변수 사용).
 
     cwd와 패키지 부모를 모두 순회한다(빈 .env.local에 막히지 않도록). cwd를 먼저 읽고
-    'k not in os.environ' 가드로 먼저 채운 키를 보존하므로 cwd가 우선한다."""
+    'k not in os.environ' 가드로 먼저 채운 키를 보존하므로 cwd가 우선한다.
+
+    import 시점이 아니라 main()에서 호출한다 — 테스트가 import만 해도 os.environ이
+    변조되는 부작용 방지."""
     for base in (Path.cwd(), Path(__file__).resolve().parent.parent):
         path = base / ".env.local"
         if not path.exists():
@@ -47,12 +53,24 @@ def _load_env_local() -> None:
             pass
 
 
-_load_env_local()
-
 SERVICE_KEY = os.environ.get("ARCHHUB_SERVICE_KEY", "").strip()
 KEY_EXPIRES = os.environ.get("ARCHHUB_KEY_EXPIRES", "").strip()  # 공용키 만료일 YYYY-MM-DD(선택)
 MCP_TOKEN = os.environ.get("ARCHHUB_MCP_TOKEN", "").strip()      # 설정 시 remote 접근에 Bearer 토큰 요구
 client = ArchHubClient(SERVICE_KEY)
+
+
+def _apply_env() -> None:
+    """환경변수를 모듈 상태에 재반영. main()에서 .env.local 로드 후 호출한다.
+
+    import 시점엔 프로세스 환경변수만 읽으므로(.env.local 미로드), .env.local로
+    키를 공급하는 로컬 stdio 실행은 이 함수가 모듈 상태를 갱신해야 동작한다."""
+    global SERVICE_KEY, KEY_EXPIRES, MCP_TOKEN
+    SERVICE_KEY = os.environ.get("ARCHHUB_SERVICE_KEY", "").strip()
+    KEY_EXPIRES = os.environ.get("ARCHHUB_KEY_EXPIRES", "").strip()
+    MCP_TOKEN = os.environ.get("ARCHHUB_MCP_TOKEN", "").strip()
+    client.service_key = SERVICE_KEY
+    if MCP_TOKEN and mcp.auth is None:
+        mcp.auth = _build_auth()
 
 
 def _build_auth():
@@ -126,9 +144,21 @@ def find_region(keyword: str, limit: int = 20) -> str:
     except Exception as e:
         return format_error(e, "find_region")
     if len(res) == 0:
-        return not_found(f"'{keyword}' 에 해당하는 지역 없음", ["시/구/동 이름 일부로 다시 검색"])
+        return not_found(f"'{keyword}' 에 해당하는 지역 없음", [
+            "시/구/동 이름 일부로 다시 검색",
+            "행정동(자양1동 등)은 법정동이 아님 — 숫자 뗀 동 이름(자양동)으로 재검색",
+        ])
     cols = ["시도명", "시군구명", "읍면동명", "동리명", "법정동코드", "sigungu_code", "bdong_code"]
-    return df_to_text(res[cols], max_rows=limit, note="아래 sigungu_code/bdong_code를 다른 도구의 인자로 사용하세요.")
+    out = res[cols].copy()
+    # 읍면동명·동리명 모두 공백 = 시군구 단위 행 — bdong_code(00000)로는 동 단위 조회 불가
+    gu_level = (
+        (out["읍면동명"].astype(str).str.strip() == "")
+        & (out["동리명"].astype(str).str.strip() == "")
+    )
+    if gu_level.any():
+        # 단일 스텝 할당 — chained assignment는 pandas 3.0(Copy-on-Write)에서 무동작
+        out["비고"] = gu_level.map({True: "구 단위 — bdong_code로 사용 불가", False: ""})
+    return df_to_text(out, max_rows=limit, note="아래 sigungu_code/bdong_code를 다른 도구의 인자로 사용하세요.")
 
 
 def _query(kind: str, ctx: str, type_name, sigungu_code, bdong_code, bun, ji, max_rows, page) -> str:
@@ -486,12 +516,15 @@ def permits_pipeline(
 
     건축인허가 기본개요 전체를 받아 허가는 났으나 사용승인 전인 '진행중' 건만 추려
     건축허가일 최근순으로 정렬한다. 실제착공일 유무로 착공/미착공 단계를 구분해 신규
-    공급 파이프라인을 파악한다. (디벨로퍼·공무원용) 동 전체를 받아 다소 느릴 수 있다.
+    공급 파이프라인을 파악한다. 허가 후 5년 경과 + 미착공 건은 건축법상 실효 가능성이
+    높아 '장기 미착공'으로 분리 집계한다(진행중 과대집계 방지).
+    (디벨로퍼·공무원용) 동 전체를 받아 다소 느릴 수 있다.
 
     Args:
         sigungu_code: 시군구 5자리 코드 (find_region으로 조회).
         bdong_code: 읍면동 5자리 코드.
-        since_year: 이 연도 이후(건축허가일 기준)만. 0이면 전체.
+        since_year: 이 연도 이후(건축허가일 기준)만. 0(기본)이면 최근 5년.
+            전체 이력이 필요하면 1900 등 충분히 과거 연도를 지정.
         top: 반환 최대 건수.
     """
     try:
@@ -505,7 +538,46 @@ def permits_pipeline(
         )
     collected = len(df)
     trunc = f" (응답 한도로 {collected}건만 수집)" if collected < total else ""
-    return pipeline_to_text(df, total, trunc, since_year or None, top)
+    # 기본(0)은 최근 5년 — 수십 년 치 실효·미착공 허가가 '진행중'으로 과대집계되는 것 방지
+    if not since_year:
+        since_year = datetime.date.today().year - 5
+    return pipeline_to_text(df, total, trunc, since_year, top)
+
+
+@mcp.tool
+def seismic_check(
+    sigungu_code: str,
+    bdong_code: str,
+    min_floors: int = 3,
+    max_buildings: int = 30,
+) -> str:
+    """법정동의 내진설계 미적용 추정 건축물을 스캔한다 (내진 의무화 연혁 기반).
+
+    건축물대장 표제부 전체를 받아 사용승인일 시점의 내진설계 의무 기준
+    (1988 도입: 6층↑/10만㎡↑ → 1995 확대 → 2005: 3층↑/1,000㎡↑ → 2015: 2층↑/500㎡↑ →
+    2017.12: 2층↑(목구조 3층↑)/200㎡↑ + 모든 주택)에 승인연도×층수×연면적을 대입해,
+    당시 의무 대상이 아니던 건물을 '내진설계 미적용 추정'으로 분류한다. 조적조·블록조 등
+    취약 구조 + 고층 순으로 우선 점검 후보를 제시한다. (안전점검·정비사업·매입실사용)
+    동 전체를 받으므로 응답이 다소 느릴 수 있다.
+
+    Args:
+        sigungu_code: 시군구 5자리 코드 (find_region으로 조회).
+        bdong_code: 읍면동 5자리 코드.
+        min_floors: 우선 점검 후보 목록에 올릴 최소 지상층수. 기본 3.
+        max_buildings: 목록 최대 건수.
+    """
+    try:
+        df, total = client.query("ledger", "표제부", sigungu_code, bdong_code, fetch_all=True)
+    except Exception as e:
+        return format_error(e, "seismic_check")
+    if len(df) == 0:
+        return not_found(
+            f"표제부 데이터 없음 (sigungu={sigungu_code}, bdong={bdong_code})",
+            ["find_region으로 코드 재확인"],
+        )
+    collected = len(df)
+    trunc = f" (응답 한도로 {collected}건만 집계)" if collected < total else ""
+    return seismic_to_text(df, total, trunc, min_floors, max_buildings)
 
 
 # ---- HTTP 라우트 ----
@@ -539,12 +611,18 @@ async def root(request):
         "endpoint": "/mcp",
         "tools": ["find_region", "building_profile", "building_floors", "price_history",
                   "building_ledger", "building_permit", "housing_permit",
-                  "old_buildings", "district_stats", "demolitions", "permits_pipeline"],
+                  "old_buildings", "district_stats", "demolitions", "permits_pipeline",
+                  "seismic_check"],
         "source": "국토교통부 건축HUB (data.go.kr)",
     })
 
 
 def main():
+    # 로깅은 stderr로만 — stdout은 stdio MCP의 JSON-RPC 스트림이라 오염 금지.
+    logging.basicConfig(stream=sys.stderr, level=logging.WARNING,
+                        format="%(asctime)s %(name)s %(levelname)s %(message)s")
+    _load_env_local()  # import 부작용 방지를 위해 여기서 로드(테스트는 main을 안 탄다)
+    _apply_env()
     parser = argparse.ArgumentParser(description="건축HUB MCP 서버")
     parser.add_argument("--transport", choices=["stdio", "http"],
                         default=os.environ.get("MCP_TRANSPORT", "stdio"))
