@@ -61,6 +61,133 @@ def test_find_region_no_result_suggests_beopjeongdong(monkeypatch):
     assert "행정동" in out and "법정동이 아님" in out
 
 
+def test_find_region_parses_bunji(monkeypatch):
+    # "자양동 680-63" — 번지를 분리해 지역만 검색하고 bun/ji 사용법을 안내
+    _patch_bdong(monkeypatch)
+    out = server.find_region("자양동 680-63")
+    assert "자양동" in out
+    assert "bun=680" in out and "ji=63" in out
+
+
+def test_find_region_parses_bun_only_with_suffix(monkeypatch):
+    _patch_bdong(monkeypatch)
+    out = server.find_region("자양동 680번지")
+    assert "bun=680" in out and "ji=" not in out
+
+
+def test_find_region_bunji_only_is_not_found(monkeypatch):
+    # 번지만 있으면 지역 검색 불가(전체 테이블 반환 방지)
+    _patch_bdong(monkeypatch)
+    out = server.find_region("680-63")
+    assert "[NOT_FOUND]" in out and "지역 키워드" in out
+
+
+# ---- parcel_history / temp_buildings 도구 ----
+
+def _route_query(responses):
+    """type_name별로 다른 DataFrame을 돌려주는 client.query 대역."""
+    def q(kind, type_name, *a, **k):
+        df = responses.get(type_name, pd.DataFrame())
+        return df, len(df)
+    return q
+
+
+def test_parcel_history_requires_bun():
+    out = server.parcel_history("11215", "10500", bun=" ")
+    assert "[NOT_FOUND]" in out and "번지(bun)" in out
+
+
+def test_parcel_history_merges_three_sources(monkeypatch):
+    yr = datetime.date.today().year
+    monkeypatch.setattr(server.client, "query", _route_query({
+        "기본개요": pd.DataFrame([
+            {"관리허가대장PK": "N1", "건축구분코드": "신축", "주용도코드명": "업무시설",
+             "건축허가일": f"{yr - 3}0418", "실제착공일": " ", "사용승인일": " ",
+             "연면적(㎡)": "1000", "건물명": "신축빌"},
+        ]),
+        "철거멸실관리대장": pd.DataFrame([
+            {"철거멸실구분코드명": "철거", "철거시작일": f"{yr - 5}0301",
+             "주용도코드명": "단독주택", "연면적(㎡)": "100"},
+        ]),
+        "가설건축물": pd.DataFrame([
+            {"관리허가대장PK": "T1", "구조코드명": "컨테이너조",
+             "전체연면적(㎡)": "36", "가설건축물존치만료일": f"{yr + 1}0101"},
+        ]),
+    }))
+    out = server.parcel_history("11215", "10500", bun="2", ji="2")
+    assert "[필지 연혁] 2-2" in out
+    assert "신축" in out and "철거멸실" in out and "가설건축물" in out
+    # 철거(yr-5)가 신축 허가(yr-3)보다 먼저(오래된 순)
+    assert out.index("철거멸실") < out.index("신축")
+
+
+def test_parcel_history_all_empty_not_found(monkeypatch):
+    monkeypatch.setattr(server.client, "query", _route_query({}))
+    out = server.parcel_history("11215", "10500", bun="9", ji="9")
+    assert "[NOT_FOUND]" in out
+
+
+def test_temp_buildings_tool(monkeypatch):
+    df = pd.DataFrame([
+        {"관리허가대장PK": "P1", "대지위치": "자양동 2-2번지", "구조코드명": "컨테이너조",
+         "주용도코드명": "가설건축물", "전체연면적(㎡)": "171",
+         "가설건축물존치만료일": "20220820"},
+    ])
+    monkeypatch.setattr(server.client, "query", lambda *a, **k: (df, len(df)))
+    out = server.temp_buildings("11215", "10500")
+    assert "존치만료 경과 1건" in out and "2-2번지" in out
+
+
+def test_temp_buildings_empty_not_found(monkeypatch):
+    monkeypatch.setattr(server.client, "query", lambda *a, **k: (pd.DataFrame(), 0))
+    out = server.temp_buildings("11215", "10500")
+    assert "[NOT_FOUND]" in out
+
+
+def test_building_profile_includes_zoning_and_septic(monkeypatch):
+    # 표제부 + 지역지구구역 + 오수정화시설(정화조) 3원천이 종합카드에 합쳐진다
+    monkeypatch.setattr(server.client, "query", _route_query({
+        "표제부": pd.DataFrame([{"건물명": "테스트빌", "주용도코드명": "업무시설"}]),
+        "지역지구구역": pd.DataFrame([
+            {"지역지구구역코드명": "일반상업지역", "대표여부": "1"},
+        ]),
+        "오수정화시설": pd.DataFrame([
+            {"형식코드명": "부패탱크방법", "용량(인용)": "2000", "용량(루베)": "0"},
+        ]),
+    }))
+    out = server.building_profile("11215", "10500", bun="2", ji="2")
+    assert "용도지역·지구: 일반상업지역" in out
+    assert "정화조: 부패탱크방법 2000인용" in out
+
+
+def test_building_profile_omits_septic_when_absent(monkeypatch):
+    monkeypatch.setattr(server.client, "query", _route_query({
+        "표제부": pd.DataFrame([{"건물명": "테스트빌"}]),
+    }))
+    out = server.building_profile("11215", "10500", bun="2")
+    assert "정화조" not in out  # 부가정보 없으면 조용히 생략
+
+
+# ---- building_data (raw 3종 통합 도구) ----
+
+def test_building_data_rejects_unknown_kind():
+    out = server.building_data("license", "표제부", "11215", "10500")
+    assert "[NOT_FOUND]" in out and "ledger" in out
+
+
+def test_building_data_routes_kind_to_query(monkeypatch):
+    seen = {}
+
+    def fake_query(kind, type_name, *a, **k):
+        seen["kind"], seen["type_name"] = kind, type_name
+        return pd.DataFrame([{"건물명": "테스트빌"}]), 1
+
+    monkeypatch.setattr(server.client, "query", fake_query)
+    out = server.building_data("housing", "동별개요", "11215", "10500")
+    assert seen == {"kind": "housing", "type_name": "동별개요"}
+    assert "테스트빌" in out and "유형=동별개요" in out
+
+
 # ---- permits_pipeline 기본 since_year ----
 
 def test_permits_pipeline_defaults_to_recent_5_years(monkeypatch):

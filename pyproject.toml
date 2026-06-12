@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "archhub-mcp"
-version = "0.3.0"
+version = "0.4.0"
 description = "국토교통부 건축HUB(공공데이터포털) → MCP 서버. 건축물대장·건축인허가·주택인허가 + 법정동코드 + 노후건축물/동단위 통계 분석."
 readme = "README.md"
 requires-python = ">=3.10"

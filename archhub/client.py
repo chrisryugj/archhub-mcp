@@ -11,6 +11,7 @@ import datetime
 import json
 import logging
 import os
+import threading
 import time
 from collections import OrderedDict
 from pathlib import Path
@@ -88,29 +89,34 @@ class _TTLCache:
     """in-memory TTL+LRU 캐시 (표준 라이브러리만 — OrderedDict 기반, 신규 의존성 금지).
 
     maxsize 초과 시 가장 오래 안 쓴 항목부터 제거(LRU). TTL 경과 항목은 get 시 폐기.
+    FastMCP가 동기 도구를 워커 스레드풀에서 돌리므로 get/set은 Lock으로 직렬화한다
+    (OrderedDict의 move_to_end/popitem 동시 호출은 내부 상태를 깨뜨릴 수 있음).
     """
 
     def __init__(self, maxsize: int = CACHE_MAX_ENTRIES, ttl: float = CACHE_TTL_S):
         self.maxsize = maxsize
         self.ttl = ttl
         self._d: OrderedDict = OrderedDict()
+        self._lock = threading.Lock()
 
     def get(self, key):
-        item = self._d.get(key)
-        if item is None:
-            return None
-        ts, val = item
-        if time.monotonic() - ts > self.ttl:
-            del self._d[key]  # 만료 — 폐기
-            return None
-        self._d.move_to_end(key)  # LRU 갱신
-        return val
+        with self._lock:
+            item = self._d.get(key)
+            if item is None:
+                return None
+            ts, val = item
+            if time.monotonic() - ts > self.ttl:
+                del self._d[key]  # 만료 — 폐기
+                return None
+            self._d.move_to_end(key)  # LRU 갱신
+            return val
 
     def set(self, key, val) -> None:
-        self._d[key] = (time.monotonic(), val)
-        self._d.move_to_end(key)
-        while len(self._d) > self.maxsize:
-            self._d.popitem(last=False)
+        with self._lock:
+            self._d[key] = (time.monotonic(), val)
+            self._d.move_to_end(key)
+            while len(self._d) > self.maxsize:
+                self._d.popitem(last=False)
 
 
 def _validate_codes(sigungu_code, bdong_code) -> None:
@@ -146,6 +152,8 @@ class ArchHubClient:
         # 일일 캡(DAILY_CALL_CAP)용 — 날짜가 바뀌면 0으로 리셋.
         self._calls_today = 0
         self._calls_date = datetime.date.today().isoformat()
+        # 카운터 갱신 직렬화 — FastMCP 워커 스레드 동시 호출 대비.
+        self._count_lock = threading.Lock()
 
     # ---- 지역코드 ----
 
@@ -306,13 +314,15 @@ class ArchHubClient:
         return df, total
 
     def _enforce_daily_cap(self) -> None:
-        """일일 호출 캡 적용. 날짜가 바뀌면 카운터를 리셋한다."""
-        today = datetime.date.today().isoformat()
-        if today != self._calls_date:
-            self._calls_date = today
-            self._calls_today = 0
-        self._calls_today += 1
-        if DAILY_CALL_CAP and self._calls_today > DAILY_CALL_CAP:
+        """일일 호출 캡 적용. 날짜가 바뀌면 카운터를 리셋한다. (Lock으로 직렬화)"""
+        with self._count_lock:
+            today = datetime.date.today().isoformat()
+            if today != self._calls_date:
+                self._calls_date = today
+                self._calls_today = 0
+            self._calls_today += 1
+            exceeded = DAILY_CALL_CAP and self._calls_today > DAILY_CALL_CAP
+        if exceeded:
             logger.warning("일일 호출 캡 도달: %d건 (오늘 %d번째 요청 차단)", DAILY_CALL_CAP, self._calls_today)
             raise ArchHubError(
                 f"오늘 공용키 호출 한도({DAILY_CALL_CAP}건)를 초과했습니다. 잠시 후/내일 다시 시도하세요.",

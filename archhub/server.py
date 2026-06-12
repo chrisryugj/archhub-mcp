@@ -8,6 +8,7 @@ import argparse
 import datetime
 import logging
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -16,12 +17,13 @@ from fastmcp import FastMCP
 from starlette.responses import JSONResponse
 
 from . import __version__
-from .client import ArchHubClient, KINDS, LEDGER_TYPES, PERMIT_TYPES, HOUSING_TYPES, DAILY_CALL_CAP
+from .client import ArchHubClient, KINDS, DAILY_CALL_CAP
 from .errors import not_found, format_error
 from .formatting import (
     df_to_text, profile_to_text, district_to_text, floors_to_text,
     price_history_to_text, demolitions_to_text, pipeline_to_text, seismic_to_text,
-    _date, _age_years,
+    parcel_history_to_text, temp_buildings_to_text,
+    _date, _age_years, _num,
 )
 
 
@@ -113,11 +115,39 @@ def _fetch_zoning(sigungu_code: str, bdong_code: str, bun: str, ji: str):
     names = [n for n in names if n and n.lower() != "nan"]
     return " · ".join(names) or None
 
+
+def _fetch_septic(sigungu_code: str, bdong_code: str, bun: str, ji: str):
+    """필지의 오수정화시설(정화조) 형식·용량 요약. 실패/없으면 None (profile 부가정보라 조용히 생략).
+
+    정화조 용량(인용)은 용도변경·증축 검토 시 오수발생량 산정의 출발점이라 실무 수요가 크다."""
+    try:
+        df, _ = client.query("ledger", "오수정화시설", sigungu_code, bdong_code,
+                             bun=bun, ji=ji, num_rows=20)
+    except Exception:
+        return None
+    if len(df) == 0:
+        return None
+    items = []
+    for _, row in df.head(3).iterrows():
+        form = str(row.get("형식코드명", "")).strip()
+        seg = [form] if form and form.lower() != "nan" else []
+        cap_person = _num(row.get("용량(인용)"))
+        cap_m3 = _num(row.get("용량(루베)"))
+        if cap_person:
+            seg.append(f"{cap_person:g}인용")
+        elif cap_m3:
+            seg.append(f"{cap_m3:g}㎥")
+        if seg:
+            items.append(" ".join(seg))
+    return " · ".join(dict.fromkeys(items)) or None
+
 mcp = FastMCP(
     name="archhub",
     instructions=(
         "국토교통부 건축HUB(공공데이터포털) 건축물대장·건축인허가·주택인허가 조회 서버. "
-        "주소는 먼저 find_region으로 sigungu_code/bdong_code를 얻은 뒤 다른 도구에 넘긴다. "
+        "주소는 먼저 find_region으로 sigungu_code/bdong_code를 얻은 뒤 다른 도구에 넘긴다"
+        "(번지가 섞인 주소는 find_region이 bun/ji도 분리해 안내한다). "
+        "필지 하나의 현황은 building_profile, 과거 이력은 parcel_history부터 시작하면 빠르다. "
         "데이터는 모두 공식 API 실측값이며, 결과가 없으면 추측하지 말고 '데이터 없음'을 보고한다."
     ),
     auth=_build_auth(),
@@ -126,21 +156,38 @@ mcp = FastMCP(
 
 # ---- 도구 ----
 
+# 번지 토큰: '680', '680-63', '680번지', '680-63번지'. 동 이름과 구분해 분리 파싱한다.
+_BUNJI_RE = re.compile(r"^(\d{1,4})(?:-(\d{1,4}))?(?:번지)?$")
+
 
 @mcp.tool
 def find_region(keyword: str, limit: int = 20) -> str:
     """주소 키워드로 시군구코드/법정동코드를 조회한다.
 
     예: "광진구 자양동" → 해당 동의 sigungu_code(5자리)·bdong_code(5자리).
-    여기서 얻은 코드를 building_ledger / building_permit / housing_permit /
-    old_buildings 도구의 sigungu_code·bdong_code 인자로 사용한다.
+    여기서 얻은 코드를 building_profile / parcel_history / building_data /
+    old_buildings 등 다른 도구의 sigungu_code·bdong_code 인자로 사용한다.
+    "자양동 680-63"처럼 번지가 섞여 있으면 자동으로 분리해 bun/ji 값을 함께 안내한다.
 
     Args:
-        keyword: 공백으로 구분된 주소 키워드(시/군/구/동). 모두 포함하는 행을 검색.
+        keyword: 공백으로 구분된 주소 키워드(시/군/구/동, 번지 포함 가능). 모두 포함하는 행을 검색.
         limit: 최대 반환 행 수.
     """
+    bun = ji = None
+    region_terms = []
+    for term in keyword.split():
+        m = _BUNJI_RE.fullmatch(term)
+        if m and bun is None:
+            bun, ji = m.group(1), m.group(2)
+        else:
+            region_terms.append(term)
+    if not region_terms:
+        return not_found(
+            f"'{keyword}' 에 지역 키워드가 없습니다(번지만 입력됨).",
+            ["동 이름과 함께 검색 (예: '자양동 680-63')"],
+        )
     try:
-        res = client.find_region(keyword)
+        res = client.find_region(" ".join(region_terms))
     except Exception as e:
         return format_error(e, "find_region")
     if len(res) == 0:
@@ -158,7 +205,10 @@ def find_region(keyword: str, limit: int = 20) -> str:
     if gu_level.any():
         # 단일 스텝 할당 — chained assignment는 pandas 3.0(Copy-on-Write)에서 무동작
         out["비고"] = gu_level.map({True: "구 단위 — bdong_code로 사용 불가", False: ""})
-    return df_to_text(out, max_rows=limit, note="아래 sigungu_code/bdong_code를 다른 도구의 인자로 사용하세요.")
+    note = "아래 sigungu_code/bdong_code를 다른 도구의 인자로 사용하세요."
+    if bun:
+        note += f" 입력의 번지는 bun={bun}" + (f", ji={ji}" if ji else "") + " 로 전달하세요."
+    return df_to_text(out, max_rows=limit, note=note)
 
 
 def _query(kind: str, ctx: str, type_name, sigungu_code, bdong_code, bun, ji, max_rows, page) -> str:
@@ -179,7 +229,8 @@ def _query(kind: str, ctx: str, type_name, sigungu_code, bdong_code, bun, ji, ma
 
 
 @mcp.tool
-def building_ledger(
+def building_data(
+    kind: str,
     type_name: str,
     sigungu_code: str,
     bdong_code: str,
@@ -188,11 +239,23 @@ def building_ledger(
     max_rows: int = 50,
     page: int = 1,
 ) -> str:
-    """건축물대장 정보를 조회한다 (국토부 건축HUB).
+    """건축HUB 원천 데이터를 직접 조회한다 (건축물대장·건축인허가·주택인허가 통합, 고급용).
+
+    종합카드(building_profile)·연혁(parcel_history)·통계(district_stats) 등 가공 도구로
+    답이 안 되는 원본 행이 필요할 때만 쓴다. kind로 대장 종류를, type_name으로 세부
+    유형을 고른다.
 
     Args:
-        type_name: 조회 유형. 다음 중 하나 —
-            기본개요|총괄표제부|표제부|층별개요|부속지번|전유공용면적|오수정화시설|주택가격|전유부|지역지구구역
+        kind: 대장 종류 — ledger(건축물대장) | permit(건축인허가) | housing(주택인허가).
+        type_name: 조회 유형. kind별 가능값 —
+            ledger: 기본개요|총괄표제부|표제부|층별개요|부속지번|전유공용면적|오수정화시설|
+                주택가격|전유부|지역지구구역
+            permit: 기본개요|동별개요|층별개요|호별개요|대수선|공작물관리대장|철거멸실관리대장|
+                가설건축물|오수정화시설|주차장|부설주차장|전유공용면적|호별전유공용면적|
+                지역지구구역|도로명대장|대지위치|주택유형
+            housing: 기본개요|동별개요|층별개요|호별개요|부대시설|오수정화시설|주차장|부설주차장|
+                전유공용면적|행위호전유공용면적|행위개요|관리공동형별개요|관리공동부대복리시설|
+                지역지구구역|복리분양시설|대지위치
         sigungu_code: 시군구 5자리 코드 (find_region으로 조회).
         bdong_code: 읍면동 5자리 코드.
         bun: 번지 본번(생략 시 동 전체). 큰 동은 번지 지정이 빠름.
@@ -200,61 +263,12 @@ def building_ledger(
         max_rows: 한 페이지 반환 행 수(최대 100; 더 필요하면 page를 증가).
         page: 페이지 번호(동 전체가 max_rows보다 많을 때 증가).
     """
-    return _query("ledger", "건축물대장", type_name, sigungu_code, bdong_code, bun, ji, max_rows, page)
-
-
-@mcp.tool
-def building_permit(
-    type_name: str,
-    sigungu_code: str,
-    bdong_code: str,
-    bun: str = "",
-    ji: str = "",
-    max_rows: int = 50,
-    page: int = 1,
-) -> str:
-    """건축인허가 정보를 조회한다 (국토부 건축HUB).
-
-    Args:
-        type_name: 조회 유형. 다음 중 하나 —
-            기본개요|동별개요|층별개요|호별개요|대수선|공작물관리대장|철거멸실관리대장|
-            가설건축물|오수정화시설|주차장|부설주차장|전유공용면적|호별전유공용면적|
-            지역지구구역|도로명대장|대지위치|주택유형
-        sigungu_code: 시군구 5자리 코드.
-        bdong_code: 읍면동 5자리 코드.
-        bun: 번지 본번.
-        ji: 번지 부번.
-        max_rows: 한 페이지 반환 행 수(최대 100; 더 필요하면 page를 증가).
-        page: 페이지 번호.
-    """
-    return _query("permit", "건축인허가", type_name, sigungu_code, bdong_code, bun, ji, max_rows, page)
-
-
-@mcp.tool
-def housing_permit(
-    type_name: str,
-    sigungu_code: str,
-    bdong_code: str,
-    bun: str = "",
-    ji: str = "",
-    max_rows: int = 50,
-    page: int = 1,
-) -> str:
-    """주택인허가 정보를 조회한다 (국토부 건축HUB).
-
-    Args:
-        type_name: 조회 유형. 다음 중 하나 —
-            기본개요|동별개요|층별개요|호별개요|부대시설|오수정화시설|주차장|부설주차장|
-            전유공용면적|행위호전유공용면적|행위개요|관리공동형별개요|관리공동부대복리시설|
-            지역지구구역|복리분양시설|대지위치
-        sigungu_code: 시군구 5자리 코드.
-        bdong_code: 읍면동 5자리 코드.
-        bun: 번지 본번.
-        ji: 번지 부번.
-        max_rows: 한 페이지 반환 행 수(최대 100; 더 필요하면 page를 증가).
-        page: 페이지 번호.
-    """
-    return _query("housing", "주택인허가", type_name, sigungu_code, bdong_code, bun, ji, max_rows, page)
+    if kind not in KINDS:
+        return not_found(
+            f"알 수 없는 kind '{kind}' — ledger(건축물대장)/permit(건축인허가)/housing(주택인허가) 중 선택",
+        )
+    label = KINDS[kind][0]
+    return _query(kind, label, type_name, sigungu_code, bdong_code, bun, ji, max_rows, page)
 
 
 @mcp.tool
@@ -282,7 +296,7 @@ def building_profile(
     """
     if not str(bun).strip():
         return not_found(
-            "building_profile은 번지(bun)가 필요합니다. 동 전체 조회는 building_ledger를 쓰세요.",
+            "building_profile은 번지(bun)가 필요합니다. 동 전체 조회는 building_data(kind=ledger)를 쓰세요.",
             ["find_region으로 코드 확인 후 bun(본번) 지정"],
         )
     try:
@@ -298,7 +312,8 @@ def building_profile(
             ["find_region으로 코드 재확인", "ji(부번) 조정", "건축물대장이 없는 필지일 수 있음"],
         )
     zoning = _fetch_zoning(sigungu_code, bdong_code, bun, ji)
-    return profile_to_text(df, total, max_buildings, zoning=zoning)
+    septic = _fetch_septic(sigungu_code, bdong_code, bun, ji)
+    return profile_to_text(df, total, max_buildings, zoning=zoning, septic=septic)
 
 
 @mcp.tool
@@ -580,6 +595,90 @@ def seismic_check(
     return seismic_to_text(df, total, trunc, min_floors, max_buildings)
 
 
+@mcp.tool
+def parcel_history(
+    sigungu_code: str,
+    bdong_code: str,
+    bun: str,
+    ji: str = "",
+    top: int = 40,
+) -> str:
+    """한 필지의 건축 연혁 타임라인을 조회한다 (인허가 + 철거멸실 + 가설건축물 통합).
+
+    건축인허가 기본개요·철거멸실관리대장·가설건축물을 한 번에 받아 허가→착공→사용승인,
+    철거, 가설건축물 존치(만료 포함)를 오래된 순 타임라인으로 묶는다. "이 땅에 무슨 일이
+    있었나"를 1콜로 — 민원 대응·이력 확인(공무원), 매입 실사(디벨로퍼·중개·감정평가)의
+    출발점. 증축·대수선·용도변경 이력도 건축구분으로 드러난다.
+
+    Args:
+        sigungu_code: 시군구 5자리 코드 (find_region으로 조회).
+        bdong_code: 읍면동 5자리 코드.
+        bun: 번지 본번. **필수** (필지 단위 조회).
+        ji: 번지 부번(생략 가능).
+        top: 표시할 최대 이벤트 수.
+    """
+    if not str(bun).strip():
+        return not_found(
+            "parcel_history는 번지(bun)가 필요합니다.",
+            ["find_region으로 코드 확인 후 bun(본번) 지정"],
+        )
+    frames = {}
+    for label, type_name in (("permits", "기본개요"), ("demos", "철거멸실관리대장"),
+                             ("temps", "가설건축물")):
+        try:
+            frames[label], _ = client.query(
+                "permit", type_name, sigungu_code, bdong_code,
+                bun=bun, ji=ji, num_rows=100,
+            )
+        except Exception as e:
+            return format_error(e, f"parcel_history({type_name})")
+    if all(len(f) == 0 for f in frames.values()):
+        return not_found(
+            f"필지 연혁 없음 (sigungu={sigungu_code}, bdong={bdong_code}, bun={bun}, ji={ji})",
+            ["find_region으로 코드 재확인", "ji(부번) 조정"],
+        )
+    return parcel_history_to_text(frames["permits"], frames["demos"], frames["temps"],
+                                  bun=bun, ji=ji, top=top)
+
+
+@mcp.tool
+def temp_buildings(
+    sigungu_code: str,
+    bdong_code: str,
+    bun: str = "",
+    ji: str = "",
+    top: int = 30,
+) -> str:
+    """법정동(또는 필지)의 가설건축물 존치 현황을 만료 경과/임박 순으로 스캔한다.
+
+    건축인허가 가설건축물 대장을 받아 허가대장 PK 단위로 묶고, 가설건축물존치만료일
+    기준으로 ① 만료 경과 ② 만료임박(180일 이내) ③ 유효 ④ 미상을 집계한 뒤 만료 경과
+    오래된 순 → 임박 순으로 우선 점검 후보를 제시한다. 존치기간 연장 신고 관리·정기
+    점검(건축행정 공무원), 현장 가설사무소·견본주택 존치 확인(시공·디벨로퍼)용.
+    동 전체를 받으므로 응답이 다소 느릴 수 있다(bun 지정 시 필지 한정).
+
+    Args:
+        sigungu_code: 시군구 5자리 코드 (find_region으로 조회).
+        bdong_code: 읍면동 5자리 코드.
+        bun: 번지 본번(생략 시 동 전체).
+        ji: 번지 부번.
+        top: 우선 점검 후보 최대 건수.
+    """
+    try:
+        df, total = client.query("permit", "가설건축물", sigungu_code, bdong_code,
+                                 bun=bun, ji=ji, fetch_all=True)
+    except Exception as e:
+        return format_error(e, "temp_buildings")
+    if len(df) == 0:
+        return not_found(
+            f"가설건축물 데이터 없음 (sigungu={sigungu_code}, bdong={bdong_code})",
+            ["find_region으로 코드 재확인"],
+        )
+    collected = len(df)
+    trunc = f" (응답 한도로 {collected}건만 집계)" if collected < total else ""
+    return temp_buildings_to_text(df, total, trunc, top)
+
+
 # ---- HTTP 라우트 ----
 
 
@@ -610,7 +709,7 @@ async def root(request):
         "transport": "streamable-http",
         "endpoint": "/mcp",
         "tools": ["find_region", "building_profile", "building_floors", "price_history",
-                  "building_ledger", "building_permit", "housing_permit",
+                  "parcel_history", "temp_buildings", "building_data",
                   "old_buildings", "district_stats", "demolitions", "permits_pipeline",
                   "seismic_check"],
         "source": "국토교통부 건축HUB (data.go.kr)",

@@ -4,8 +4,9 @@ import pandas as pd
 
 from archhub.formatting import (
     _num, _g, _date, _area, _eok, _year_of, _pct, _floor_sort_key, _sample_trend,
-    _permit_kind, building_card, profile_to_text, district_to_text, floors_to_text,
-    price_history_to_text, demolitions_to_text, pipeline_to_text, df_to_text, SOURCE,
+    _permit_kind, _prune_columns, building_card, profile_to_text, district_to_text,
+    floors_to_text, price_history_to_text, demolitions_to_text, pipeline_to_text,
+    parcel_history_to_text, temp_buildings_to_text, df_to_text, SOURCE,
 )
 import datetime
 
@@ -16,6 +17,8 @@ def test_num_treats_zero_and_blank_as_none():
     assert _num("0") is None      # 미기재 취급
     assert _num("") is None
     assert _num("abc") is None
+    assert _num("nan") is None            # float('nan') 파싱 성공 케이스 차단
+    assert _num(float("nan")) is None     # 결측 셀(NaN) — 미기재 취급
 
 
 def test_g_filters_blank_nan_zero():
@@ -430,3 +433,127 @@ def test_df_to_text_empty_and_source():
     assert "0건" in df_to_text(pd.DataFrame())
     out = df_to_text(pd.DataFrame([{"a": 1}, {"a": 2}]), max_rows=1)
     assert "상위 1건" in out and SOURCE in out
+
+
+# ---- 컬럼 프루닝 (토큰 최적화) ----
+
+def _prune_df():
+    return pd.DataFrame([
+        {"시군구코드": "11215", "법정동코드": "10500", "순번": "1", "건물명": "A",
+         "특수지명": "", "구조코드": "43", "구조코드명": "철근콘크리트구조",
+         "건축구분코드명": "0100", "건축구분코드": "신축", "지하층수": "0"},
+        {"시군구코드": "11215", "법정동코드": "10500", "순번": "2", "건물명": "B",
+         "특수지명": "nan", "구조코드": "21", "구조코드명": "벽돌구조",
+         "건축구분코드명": "0600", "건축구분코드": "대수선", "지하층수": "1"},
+    ])
+
+
+def test_prune_drops_empty_echo_and_code_twins():
+    pruned, n = _prune_columns(_prune_df())
+    assert "특수지명" not in pruned.columns                 # 전부 빈값
+    for col in ("시군구코드", "법정동코드", "순번"):        # 조회 인자/행번호 에코
+        assert col not in pruned.columns
+    assert "구조코드" not in pruned.columns                 # 코드값 쪽 제거
+    assert "구조코드명" in pruned.columns                   # 한글 명칭 유지
+    assert n == 6
+
+
+def test_prune_handles_swapped_code_columns():
+    # swap 환경(명칭이 '건축구분코드'에): 값 기준이므로 코드값 쪽('건축구분코드명')이 제거된다
+    pruned, _ = _prune_columns(_prune_df())
+    assert "건축구분코드명" not in pruned.columns
+    assert "건축구분코드" in pruned.columns
+
+
+def test_prune_keeps_zero_columns():
+    # '0'은 미기재가 아니라 의미값일 수 있음(지하층수 0 등) — 제거하지 않는다
+    pruned, _ = _prune_columns(_prune_df())
+    assert "지하층수" in pruned.columns
+
+
+def test_df_to_text_prune_note_and_opt_out():
+    out = df_to_text(_prune_df())
+    assert "컬럼 6개 생략" in out and "특수지명" not in out
+    out_raw = df_to_text(_prune_df(), prune=False)
+    assert "특수지명" in out_raw and "생략" not in out_raw
+
+
+# ---- parcel_history (필지 연혁 타임라인) ----
+
+def test_parcel_history_merges_and_sorts_sources():
+    today = datetime.date(2026, 6, 12)
+    permits = pd.DataFrame([
+        {"관리허가대장PK": "N1", "건축구분코드": "신축", "주용도코드명": "업무시설",
+         "건축허가일": "20180418", "실제착공일": "20190926", "사용승인일": "20221007",
+         "연면적(㎡)": "28515.35", "호수(호)": "366", "건물명": "자이엘라"},
+        {"관리허가대장PK": "T1", "건축허가일": "20200630", "연면적(㎡)": "36"},  # 가설 PK → 가설 이벤트로
+        {"관리허가대장PK": "N2"},  # 일자·구분·면적 전무 — 노이즈 제외
+    ])
+    demos = pd.DataFrame([
+        {"철거멸실구분코드명": "철거", "철거시작일": "20190301", "철거종료일": "20190430",
+         "주용도코드명": "문화및집회시설", "구조코드명": "철골콘크리트구조",
+         "연면적(㎡)": "4697.48", "천장재함유유무": "1"},
+    ])
+    temps = pd.DataFrame([
+        {"관리허가대장PK": "T1", "구조코드명": "컨테이너조", "전체연면적(㎡)": "36",
+         "가설건축물존치만료일": "20220820"},
+    ])
+    out = parcel_history_to_text(permits, demos, temps, bun="2", ji="2", today=today)
+    assert "[필지 연혁] 2-2" in out
+    assert "신축" in out and "착공 2019-09-26 → 사용승인 2022-10-07" in out
+    assert "철거멸실" in out and "⚠석면(천장)" in out
+    # 가설: 기본개요의 허가일이 합쳐지고, 기본개요 쪽 중복 행은 미표시
+    assert "2020-06-30 허가 — 가설건축물" in out
+    assert "존치만료 2022-08-20" in out and "경과" in out
+    assert "빈 행 1건 제외" in out
+    # 오래된 순: 신축허가(2018) → 철거(2019) → 가설(2020)
+    assert out.index("2018-04-18") < out.index("2019-03-01") < out.index("2020-06-30")
+    assert SOURCE in out
+
+
+def test_parcel_history_all_empty_is_not_found():
+    out = parcel_history_to_text(pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), bun="9")
+    assert "[NOT_FOUND]" in out
+
+
+# ---- temp_buildings (가설건축물 존치 현황) ----
+
+def _temp_df():
+    return pd.DataFrame([
+        # 만료 경과 — 같은 PK 2행(동 2개)은 1건으로 묶임
+        {"관리허가대장PK": "P1", "대지위치": "자양동 2-2번지", "구조코드명": "컨테이너조",
+         "주용도코드명": "가설건축물", "전체연면적(㎡)": "171", "가설건축물존치만료일": "20220820"},
+        {"관리허가대장PK": "P1", "대지위치": "자양동 2-2번지", "구조코드명": "컨테이너조",
+         "주용도코드명": "가설건축물", "전체연면적(㎡)": "171", "가설건축물존치만료일": "20220820"},
+        # 만료임박 (D-50)
+        {"관리허가대장PK": "P2", "대지위치": "자양동 3-1번지", "구조코드명": "컨테이너조",
+         "주용도코드명": "가설건축물", "전체연면적(㎡)": "36", "가설건축물존치만료일": "20260801"},
+        # 유효
+        {"관리허가대장PK": "P3", "대지위치": "자양동 4-1번지", "구조코드명": "컨테이너조",
+         "주용도코드명": "가설건축물", "전체연면적(㎡)": "20", "가설건축물존치만료일": "20280101"},
+        # 만료일 미상
+        {"관리허가대장PK": "P4", "대지위치": "자양동 5-1번지", "구조코드명": "컨테이너조",
+         "주용도코드명": "가설건축물", "전체연면적(㎡)": "10", "가설건축물존치만료일": " "},
+    ])
+
+
+def test_temp_buildings_classifies_by_expiry():
+    out = temp_buildings_to_text(_temp_df(), total=5, today=datetime.date(2026, 6, 12))
+    assert "PK 기준 4건" in out                            # 5행 → PK 4건
+    assert "존치만료 경과 1건" in out
+    assert "만료임박(180일 이내) 1건" in out
+    assert "유효 1건" in out and "미상 1건" in out
+    assert "2개 동" in out                                  # P1 동 2개 묶음
+    assert "D-50" in out                                    # 2026-08-01 임박
+    # 만료 경과가 임박보다 먼저
+    assert out.index("2-2번지") < out.index("3-1번지")
+    # 유효·미상은 우선 점검 목록에 미표시
+    assert "4-1번지" not in out and "5-1번지" not in out
+    assert "연장 신고가 대장에 지연 반영" in out            # 해석 주의
+    assert SOURCE in out
+
+
+def test_temp_buildings_no_expired_message():
+    df = _temp_df().iloc[[3]]  # 유효 건만
+    out = temp_buildings_to_text(df, total=1, today=datetime.date(2026, 6, 12))
+    assert "만료 경과·임박 건 없음" in out

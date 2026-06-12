@@ -14,10 +14,12 @@ SOURCE = "출처: 국토교통부 건축HUB (공공데이터포털 data.go.kr)"
 
 
 def _num(v) -> Optional[float]:
-    """문자열/숫자를 float로. 빈값·'0'·파싱불가는 None(미기재 취급)."""
+    """문자열/숫자를 float로. 빈값·'0'·NaN·파싱불가는 None(미기재 취급)."""
     try:
         f = float(str(v).replace(",", "").strip())
     except (ValueError, TypeError):
+        return None
+    if f != f:  # NaN — float('nan')은 파싱에 성공하므로 별도 차단(결측 셀이 'nan㎡'로 새는 버그 방지)
         return None
     return f if f != 0 else None
 
@@ -164,9 +166,9 @@ def building_card(row: pd.Series) -> str:
 
 def profile_to_text(
     df: pd.DataFrame, total: int, max_buildings: int,
-    note: str = "", zoning: Optional[str] = None,
+    note: str = "", zoning: Optional[str] = None, septic: Optional[str] = None,
 ) -> str:
-    """필지의 표제부 행(동)들을 종합카드 묶음으로. zoning은 용도지역(법적 규제)."""
+    """필지의 표제부 행(동)들을 종합카드 묶음으로. zoning은 용도지역, septic은 정화조."""
     shown = df.head(max_buildings)
     header = f"건축물 {total}개 동"
     if total > max_buildings:
@@ -174,6 +176,8 @@ def profile_to_text(
     parts = [header]
     if zoning:
         parts.append(f"용도지역·지구: {zoning}")  # 건축 규제의 출발점
+    if septic:
+        parts.append(f"정화조: {septic}")  # 용도변경·증축 시 오수발생량 검토의 출발점
     if note:
         parts.append(note)
     parts.append("")
@@ -640,6 +644,202 @@ def pipeline_to_text(
     return "\n".join(lines)
 
 
+# ---- 필지 연혁 (parcel_history) ----
+
+
+def _asbestos_suffix(row) -> str:
+    """철거멸실 행의 석면 함유 부위 ⚠ 표기 (없으면 빈 문자열)."""
+    asb = [lab for col, lab in _ASBESTOS.items() if str(row.get(col, "")).strip() == "1"]
+    return f" ⚠석면({'·'.join(asb)})" if asb else ""
+
+
+def _temp_expiry_label(expiry: Optional[str], today: datetime.date) -> str:
+    """가설건축물 존치만료일 → '존치만료 YYYY-MM-DD(경과/D-n)' 라벨. 미상이면 '존치만료일 미상'."""
+    d = _date(expiry)
+    if not d:
+        return "존치만료일 미상"
+    delta = (datetime.date.fromisoformat(d) - today).days
+    state = f"경과 {-delta}일" if delta < 0 else f"D-{delta}"
+    return f"존치만료 {d}({state})"
+
+
+def parcel_history_to_text(
+    permits: pd.DataFrame, demos: pd.DataFrame, temps: pd.DataFrame,
+    bun: str = "", ji: str = "", top: int = 40,
+    today: Optional[datetime.date] = None,
+) -> str:
+    """필지의 인허가(기본개요)·철거멸실·가설건축물을 합쳐 연혁 타임라인으로.
+
+    이벤트 1건 = 인허가 1건(허가→착공→사용승인을 한 줄에)·철거 1건·가설건축물 1건(PK 단위).
+    기본개요에는 가설건축물 건이 구분명 없이 섞여 있어(관리허가대장PK 일치, 실측),
+    가설 PK와 일치하는 기본개요 행은 제외하고 허가일만 가설 이벤트에 합친다.
+    """
+    today = today or datetime.date.today()
+    events: list[tuple[int, str]] = []  # (정렬키 YYYYMMDD, 텍스트)
+    undated: list[str] = []
+    skipped = 0
+
+    # 가설건축물: PK 단위로 묶고(동별 행 중복), 기본개요에서 허가일을 가져온다.
+    temp_pks: set = set()
+    temp_permit_date: dict = {}
+    if len(temps) and "관리허가대장PK" in temps.columns:
+        temp_pks = set(temps["관리허가대장PK"])
+    if len(permits) and "관리허가대장PK" in permits.columns:
+        for _, row in permits.iterrows():
+            pk = row.get("관리허가대장PK")
+            if pk in temp_pks:
+                temp_permit_date[pk] = _g(row, "건축허가일")
+
+    if len(permits):
+        for _, row in permits.iterrows():
+            if row.get("관리허가대장PK") in temp_pks:
+                continue  # 가설 이벤트에서 표시
+            kind = _permit_kind(row)
+            p, s, a = (_date(row.get(c)) for c in ("건축허가일", "실제착공일", "사용승인일"))
+            primary = p or s or a
+            primary_label = "허가" if p else ("착공" if s else "사용승인")
+            gfa = _area(row.get("연면적(㎡)"))
+            if not primary and not kind and not gfa:
+                skipped += 1  # 일자·구분·면적 전무한 빈 행 — 노이즈
+                continue
+            use = _g(row, "주용도코드명")
+            name = _g(row, "건물명")
+            ho = _g(row, "호수(호)")
+            se = _g(row, "세대수(세대)")
+            seg = [s_ for s_ in (kind or "(구분 미상)", use, gfa and f"연면적 {gfa}",
+                                 se and f"{se}세대", ho and f"{ho}호") if s_]
+            stage = []
+            if s:
+                stage.append(f"착공 {s}")
+            stage.append(f"사용승인 {a}" if a else "사용승인 전")
+            head = f"{' · '.join(seg)}" + (f" — {name}" if name else "")
+            if primary:
+                line = f"■ {primary} {primary_label} — {head}\n  {' → '.join(stage)}"
+                events.append((int(primary.replace("-", "")), line))
+            else:
+                undated.append(f"■ (일자 미상) — {head}")
+
+    if len(demos):
+        for _, row in demos.iterrows():
+            s_d, e_d = _date(row.get("철거시작일")), _date(row.get("철거종료일"))
+            m_d = _date(row.get("철거멸실일"))
+            primary = s_d or m_d
+            kind = _g(row, "철거멸실구분코드명") or "철거"
+            gfa = _area(row.get("연면적(㎡)"))
+            seg = [v for v in (kind, _g(row, "주용도코드명"), _g(row, "구조코드명"),
+                               gfa and f"연면적 {gfa}") if v]
+            period = f" ({s_d}~{e_d})" if s_d and e_d else ""
+            line = f"■ {primary or '(일자 미상)'} 철거멸실 — {' · '.join(seg)}{period}{_asbestos_suffix(row)}"
+            if primary:
+                events.append((int(primary.replace("-", "")), line))
+            else:
+                undated.append(line)
+
+    if len(temps) and "관리허가대장PK" in temps.columns:
+        for pk, sub in temps.groupby("관리허가대장PK"):
+            row = sub.iloc[0]
+            permit_d = _date(temp_permit_date.get(pk))
+            gfa = _area(row.get("전체연면적(㎡)")) or _area(row.get("연면적(㎡)"))
+            seg = [v for v in ("가설건축물", _g(row, "구조코드명"), gfa and f"연면적 {gfa}",
+                               f"{len(sub)}개 동" if len(sub) > 1 else None) if v]
+            seg.append(_temp_expiry_label(row.get("가설건축물존치만료일"), today))
+            line = f"■ {permit_d or '(일자 미상)'} 허가 — {' · '.join(seg)}"
+            if permit_d:
+                events.append((int(permit_d.replace("-", "")), line))
+            else:
+                undated.append(line)
+
+    if not events and not undated:
+        return not_found(
+            f"필지 연혁 없음 (bun={bun}, ji={ji}) — 인허가·철거·가설건축물 기록이 모두 없음",
+            ["find_region으로 코드 재확인", "ji(부번) 조정"],
+        )
+
+    events.sort(key=lambda e: e[0])
+    loc = f"{bun}-{ji}" if ji else (bun or "")
+    n_all = len(events) + len(undated)
+    lines = [f"[필지 연혁] {loc} · 이벤트 {n_all}건 "
+             f"(인허가 {len(permits)}건 · 철거멸실 {len(demos)}건 · 가설건축물 {len(temp_pks) or 0}건 PK기준)"]
+    if skipped:
+        lines.append(f"일자·구분 미상의 빈 행 {skipped}건 제외")
+    if n_all > top:
+        lines.append(f"오래된 순 상위 {top}건 표시 (top으로 조정)")
+    lines.append("")
+    shown = [line for _, line in events] + undated
+    lines.extend(shown[:top])
+    lines.append("")
+    lines.append("※ 건축HUB 인허가·철거·가설건축물 대장 기준 — 등재 지연·누락 가능. "
+                 "공부(건축물대장 열람)와 대조해 확정하세요.")
+    lines.append(SOURCE)
+    return "\n".join(lines)
+
+
+# ---- 가설건축물 존치 현황 (temp_buildings) ----
+
+# 존치만료 '임박' 판정 기준(일). 만료 전 연장 신고 안내·점검 리드타임 고려.
+TEMP_EXPIRY_SOON_DAYS = 180
+
+
+def temp_buildings_to_text(
+    df: pd.DataFrame, total: int, trunc: str = "", top: int = 30,
+    today: Optional[datetime.date] = None,
+) -> str:
+    """가설건축물 대장을 PK 단위로 묶어 존치만료 경과/임박/유효/미상으로 분류.
+
+    존치기간 만료 가설건축물 점검(연장 신고 관리)은 건축행정 반복 업무다.
+    만료 경과(오래된 순) → 임박(만료 가까운 순)을 우선 목록으로 제시한다.
+    """
+    today = today or datetime.date.today()
+    rows = []
+    if "관리허가대장PK" in df.columns:
+        grouped = [(sub.iloc[0], len(sub)) for _, sub in df.groupby("관리허가대장PK", sort=False)]
+    else:
+        grouped = [(row, 1) for _, row in df.iterrows()]
+    for row, n_dong in grouped:
+        d = _date(row.get("가설건축물존치만료일"))
+        delta = (datetime.date.fromisoformat(d) - today).days if d else None
+        rows.append((delta, d, row, n_dong))
+
+    expired = sorted([r for r in rows if r[0] is not None and r[0] < 0], key=lambda r: r[0])
+    soon = sorted([r for r in rows if r[0] is not None and 0 <= r[0] <= TEMP_EXPIRY_SOON_DAYS],
+                  key=lambda r: r[0])
+    valid = [r for r in rows if r[0] is not None and r[0] > TEMP_EXPIRY_SOON_DAYS]
+    unknown = [r for r in rows if r[0] is None]
+
+    lines = [f"[가설건축물 존치 현황] 대장 {total}건{trunc} · 허가대장 PK 기준 {len(rows)}건", ""]
+    lines.append(
+        f"존치만료 경과 {len(expired)}건 · 만료임박({TEMP_EXPIRY_SOON_DAYS}일 이내) {len(soon)}건 · "
+        f"유효 {len(valid)}건 · 만료일 미상 {len(unknown)}건"
+    )
+    lines.append("")
+
+    listed = expired + soon
+    if not listed:
+        lines.append("(만료 경과·임박 건 없음)")
+    else:
+        lines.append(f"우선 점검 후보 {len(listed)}건 (만료 경과 오래된 순 → 임박 순)")
+        if len(listed) > top:
+            lines.append(f"상위 {top}건 표시 (top으로 조정)")
+        lines.append("")
+    for delta, d, row, n_dong in listed[:top]:
+        loc = _g(row, "도로명대지위치") or _g(row, "대지위치") or "(위치 미상)"
+        gfa = _area(row.get("전체연면적(㎡)")) or _area(row.get("연면적(㎡)"))
+        state = f"경과 {-delta}일" if delta < 0 else f"D-{delta}"
+        seg = [v for v in (_g(row, "구조코드명"), _g(row, "주용도코드명"),
+                           gfa and f"연면적 {gfa}",
+                           n_dong > 1 and f"{n_dong}개 동" or None) if v]
+        seg.append(f"존치만료 {d} ({state})")
+        name = _g(row, "건물명")
+        lines.append(f"■ {loc}" + (f" — {name}" if name else ""))
+        lines.append(f"  {' · '.join(seg)}")
+
+    lines.append("")
+    lines.append("※ 존치기간 연장 신고가 대장에 지연 반영될 수 있어 '만료 경과'가 곧 위반·존치를 "
+                 "뜻하지 않습니다. 현장 확인·대장 열람으로 확정하세요.")
+    lines.append(SOURCE)
+    return "\n".join(lines)
+
+
 # ---- 내진설계 의무화 연혁 (seismic_check) ----
 
 # 건축법 시행령상 내진설계 의무 대상 기준의 변천 — 사용승인일 시점 기준으로 근사 판정.
@@ -780,18 +980,64 @@ def seismic_to_text(
     return "\n".join(lines)
 
 
-def df_to_text(df: Optional[pd.DataFrame], max_rows: int = 50, note: str = "") -> str:
+# 조회 인자(지역코드)·행번호의 에코 컬럼 — 정보가 없어 프루닝 대상.
+_ECHO_COLUMNS = ("시군구코드", "법정동코드", "순번")
+
+
+def _prune_columns(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
+    """토큰 절약용 컬럼 프루닝. (프루닝된 df, 제거 컬럼 수) 반환.
+
+    원본 API 응답은 컬럼이 수십~90개로, 빈 컬럼과 코드/코드명 중복이 토큰을 잠식한다.
+    ① 전부 빈값('', nan, none)인 컬럼 ② 'X코드명' 쌍이 있는 'X코드' 중 값이 ASCII
+    코드값인 쪽(한글 명칭 쪽 유지 — 값 기준이라 PublicDataReader의 컬럼 swap에도 안전)
+    ③ 조회 인자 에코(시군구코드·법정동코드·순번)를 제거한다. 숫자 '0' 컬럼은 의미가
+    있을 수 있어(지하층수 0 등) 제거하지 않는다.
+    """
+
+    def _vals(col: str) -> pd.Series:
+        s = df[col].astype(str).str.strip()
+        return s[~s.str.lower().isin(["", "nan", "none"])]
+
+    def _code_like(s: pd.Series) -> bool:
+        return len(s) > 0 and bool(s.str.fullmatch(r"[0-9A-Za-z.\-_ ]+").all())
+
+    drop: set[str] = set()
+    for col in df.columns:
+        if col in _ECHO_COLUMNS or len(_vals(col)) == 0:
+            drop.add(col)
+    for col in df.columns:
+        if not col.endswith("코드명"):
+            continue
+        twin = col[:-1]  # 'X코드명' → 'X코드'
+        if twin not in df.columns or col in drop or twin in drop:
+            continue
+        a, b = _vals(col), _vals(twin)
+        if _code_like(b) and not _code_like(a):
+            drop.add(twin)
+        elif _code_like(a) and not _code_like(b):
+            drop.add(col)  # swap된 경우 — 명칭이 'X코드'에 들어있음
+    kept = [c for c in df.columns if c not in drop]
+    return df[kept], len(drop)
+
+
+def df_to_text(df: Optional[pd.DataFrame], max_rows: int = 50, note: str = "",
+               prune: bool = True) -> str:
     """DataFrame을 '총 N건 + 표 + 출처' 텍스트로. 빈 결과는 errors.not_found 권장."""
     if df is None or len(df) == 0:
         return "조회 결과 없음 (0건)\n\n" + SOURCE
     total = len(df)
     shown = df.head(max_rows)
+    dropped = 0
+    if prune:
+        shown, dropped = _prune_columns(shown)
     header = f"총 {total}건"
     if total > max_rows:
         header += f" 중 상위 {max_rows}건 표시 (전체가 필요하면 max_rows를 늘리세요)"
     parts = [header]
     if note:
         parts.append(note)
+    if dropped:
+        parts.append(f"(빈 값·코드/코드명 중복·조회인자 에코 컬럼 {dropped}개 생략)")
     parts.append("")
     parts.append(shown.to_string(index=False))
     parts.append("")
