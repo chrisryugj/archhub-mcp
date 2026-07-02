@@ -242,7 +242,7 @@ remote 커넥터(fly.io)가 떠 있어, 사용자는 **URL만 등록하면** 별
 설정 → **커넥터** → **커스텀 커넥터 추가** → URL에 입력:
 
 ```
-https://archhub-mcp.fly.dev/mcp
+https://mcp.gomdori.app/archhub
 ```
 
 추가 후 **구성 → 모든 도구 "항상 사용"**으로 설정하면, 채팅에서 "광진구 자양동 노후건물 알려줘"로 바로 사용.
@@ -250,7 +250,7 @@ https://archhub-mcp.fly.dev/mcp
 ### Claude Code
 
 ```bash
-claude mcp add --transport http archhub https://archhub-mcp.fly.dev/mcp
+claude mcp add --transport http archhub https://mcp.gomdori.app/archhub
 ```
 
 ### Claude Desktop / Cursor / Windsurf
@@ -260,7 +260,7 @@ claude mcp add --transport http archhub https://archhub-mcp.fly.dev/mcp
 ```json
 {
   "mcpServers": {
-    "archhub": { "type": "http", "url": "https://archhub-mcp.fly.dev/mcp" }
+    "archhub": { "type": "http", "url": "https://mcp.gomdori.app/archhub" }
   }
 }
 ```
@@ -270,7 +270,7 @@ Claude Desktop은 원격 HTTP를 직접 못 붙이므로 `mcp-remote` 어댑터 
 ```json
 {
   "mcpServers": {
-    "archhub": { "command": "npx", "args": ["-y", "mcp-remote", "https://archhub-mcp.fly.dev/mcp"] }
+    "archhub": { "command": "npx", "args": ["-y", "mcp-remote", "https://mcp.gomdori.app/archhub"] }
   }
 }
 ```
