@@ -1,5 +1,14 @@
 # archhub-mcp — 프로젝트 메모
 
+> ## ⚠️ 배포 — 통합 호스트 (2026-07-02부터)
+>
+> 프로덕션 공식 서빙은 **[gomdori-mcp](https://github.com/chrisryugj/gomdori-mcp) 통합 호스트**(fly 앱 `korean-law-mcp` 1대, MCP 5종 동거)다.
+> - 공식 주소: `https://mcp.gomdori.app/archhub` (구 `archhub-mcp.fly.dev/mcp`는 과도기 병행, 이전 후 scale 0 예정)
+> - **반영 절차**: 이 레포는 PyPI 미배포 — main에 커밋·푸시한 뒤 `cd ~/workspace/gomdori-mcp && fly deploy -c fly.production.toml` (pip가 GitHub main을 설치) → `curl https://mcp.gomdori.app/healthz` 확인
+> - 이 레포의 `fly deploy`는 **구 병행 앱에만** 반영된다 — 통합 반영은 반드시 위 절차로
+> - 단일 머신 제약(인메모리 캡·세션)은 통합 호스트에서도 유지됨 (`fly scale count 1`)
+
+
 국토교통부 건축HUB(공공데이터포털) → MCP 서버. Python + FastMCP 3.x.
 
 ## 구조
