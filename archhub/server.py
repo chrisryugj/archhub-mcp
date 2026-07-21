@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pandas as pd
 from fastmcp import FastMCP
+from starlette.middleware import Middleware
 from starlette.responses import JSONResponse
 
 from . import __version__
@@ -716,6 +717,63 @@ async def root(request):
     })
 
 
+class Utf8RequestBodyMiddleware:
+    """POST 요청 본문을 UTF-8로 정규화하는 ASGI 미들웨어(http 트랜스포트 전용).
+
+    한국어 Windows의 일부 MCP 클라이언트는 한글 인자(예: keyword="광진구 자양동")를
+    CP949로 직렬화해 전송한다. 그러면 라우트의 json.loads(body)가 UnicodeDecodeError를
+    던져 미처리 예외 → HTTP 500(-32603, "Error handling POST request")이 된다.
+    라우트에 닿기 전에, 본문이 UTF-8이 아니면 CP949/EUC-KR로 관대 디코드해 UTF-8 bytes로
+    바꿔 방어한다(이미 UTF-8이면 그대로 통과 — 정상 클라이언트엔 무영향).
+
+    본문은 청크 경계에서 멀티바이트가 잘려 디코드가 깨지지 않도록 전부 모아 한 번에
+    변환한다. MCP JSON-RPC 요청은 작아 버퍼링 비용이 무시할 수준이다.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or scope.get("method") != "POST":
+            return await self.app(scope, receive, send)
+
+        body = b""
+        saw_request = False
+        more = True
+        while more:
+            msg = await receive()
+            if msg["type"] == "http.request":
+                saw_request = True
+                body += msg.get("body", b"")
+                more = msg.get("more_body", False)
+            else:
+                more = False  # http.disconnect 등 — 정규화 없이 원본 흐름 위임
+        if not saw_request:
+            return await self.app(scope, receive, send)
+
+        if body:
+            try:
+                body.decode("utf-8")
+            except UnicodeDecodeError:
+                for enc in ("cp949", "euc-kr"):
+                    try:
+                        body = body.decode(enc).encode("utf-8")
+                        break
+                    except UnicodeDecodeError:
+                        continue  # 모두 실패하면 원본 유지(하위에서 판단)
+
+        sent = False
+
+        async def receive_normalized():
+            nonlocal sent
+            if not sent:
+                sent = True
+                return {"type": "http.request", "body": body, "more_body": False}
+            return await receive()
+
+        await self.app(scope, receive_normalized, send)
+
+
 def main():
     # 로깅은 stderr로만 — stdout은 stdio MCP의 JSON-RPC 스트림이라 오염 금지.
     logging.basicConfig(stream=sys.stderr, level=logging.WARNING,
@@ -730,7 +788,9 @@ def main():
     args = parser.parse_args()
 
     if args.transport == "http":
-        mcp.run(transport="http", host=args.host, port=args.port)
+        # 비-UTF-8(CP949 등) 요청 본문을 라우트 이전에 UTF-8로 정규화 — 한글 인자 500 방어.
+        mcp.run(transport="http", host=args.host, port=args.port,
+                middleware=[Middleware(Utf8RequestBodyMiddleware)])
     else:
         mcp.run()
 
