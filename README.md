@@ -238,7 +238,8 @@ remote 커넥터(fly.io)가 떠 있어, 사용자는 **URL만 등록하면** 별
 원격 서버가 떠 있어 **별도 발급·설정 없이** URL만 등록하면 된다.
 
 > **주소 안내** — 공식 주소는 `https://mcp.gomdori.app/archhub` 다.
-> 구 주소 `https://archhub-mcp.fly.dev/mcp` 도 병행 유지하지만, 신규 등록은 공식 주소를 쓰는 게 좋다.
+> 구 주소 `https://archhub-mcp.fly.dev/mcp` 는 통합 호스트로 이전을 마치고 **운영 종료**했다.
+> 구 주소로 등록해 둔 커넥터는 위 공식 주소로 바꿔 주면 된다(설정 변경 외 추가 작업 없음).
 
 ### Claude.ai 웹 (설치 없음)
 
