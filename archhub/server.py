@@ -789,7 +789,12 @@ def main():
 
     if args.transport == "http":
         # 비-UTF-8(CP949 등) 요청 본문을 라우트 이전에 UTF-8로 정규화 — 한글 인자 500 방어.
+        # stateless_http: 요청마다 새 transport. 끄면 FastMCP가 세션을 요구해
+        # Mcp-Session-Id 없는 클라이언트에 "Bad Request: Missing session ID"(400)를 낸다.
+        # 통합 호스트의 다른 MCP 4종(law/stats/patent/school)은 모두 stateless라 동작을 맞춘다.
+        # 주의: stateless에서는 GET /mcp(SSE 스트림)가 막히고 POST/DELETE만 허용된다.
         mcp.run(transport="http", host=args.host, port=args.port,
+                stateless_http=True,
                 middleware=[Middleware(Utf8RequestBodyMiddleware)])
     else:
         mcp.run()

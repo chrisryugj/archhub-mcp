@@ -1,6 +1,6 @@
 {
   "name": "archhub",
-  "version": "0.2.0",
+  "version": "0.4.0",
   "description": "국토교통부 건축HUB → MCP. 건축물대장·건축인허가·주택인허가 + 법정동코드 + 용도지역 포함 종합카드 + 층별 구성 + 동 단위 통계·규모 벤치마크 + 노후건축물 + 공시가격 시계열 + 철거멸실(석면) + 인허가 파이프라인. 공용키 탑재 remote 커넥터(URL만 등록)",
   "author": {
     "name": "Chris",
@@ -14,7 +14,7 @@
   "mcpServers": {
     "archhub": {
       "type": "http",
-      "url": "https://archhub-mcp.fly.dev/mcp"
+      "url": "https://mcp.gomdori.app/archhub"
     }
   }
 }
