@@ -2,6 +2,7 @@
 
 **국토교통부 건축HUB 3개 API를 12개 도구로.** 건축물대장·건축인허가·주택인허가 + 법정동코드 조회 + **용도지역·정화조 포함 종합카드** + **필지 연혁 타임라인** + **가설건축물 존치 스캔** + **층별 구성** + **동 단위 통계·규모 벤치마크** + **노후건축물 분석** + **내진 취약 추정** + **공시가격 시계열** + **철거멸실(석면)** + **인허가 파이프라인**을 AI 어시스턴트에서 자연어로 바로.
 
+[![version](https://img.shields.io/badge/version-0.4.0-blue.svg)](CHANGELOG.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://www.python.org)
 [![FastMCP 3.x](https://img.shields.io/badge/FastMCP-3.x-green.svg)](https://github.com/jlowin/fastmcp)
@@ -9,7 +10,7 @@
 > 국가법령정보 MCP가 "법령"을, 통계 MCP가 "통계"를 다루듯, 이건 **건축물 실체 데이터**를 다룬다.
 > 건축물대장 · 건축인허가 · 주택인허가 — data.go.kr 공식 API 실측값만, 출처를 명시하고, 없으면 `[NOT_FOUND]`로 환각을 차단.
 
-remote 커넥터(fly.io)가 떠 있어, 사용자는 **URL만 등록하면** 별도 설정 없이 바로 쓴다.
+remote 커넥터가 통합 호스트 `mcp.gomdori.app`에 떠 있어, 사용자는 **URL만 등록하면** 별도 설정 없이 바로 쓴다.
 
 ---
 
@@ -430,17 +431,33 @@ pytest tests/             # 외부 API 비의존(네트워크 mock) · 115 케�
 
 ---
 
-## 배포 (fly.io)
+## 배포
+
+프로덕션 서빙은 **통합 호스트 `gomdori-mcp`**(fly 머신 1대에 MCP 5종 동거, 비공개 레포)가 맡는다. 이 레포는 PyPI 미배포라, 통합 호스트가 GitHub main을 **커밋 SHA로 고정**해 `pip install`한다.
+
+```bash
+# 1) 이 레포 main에 커밋·푸시
+# 2) 통합 호스트 Dockerfile의 핀(pip install git+...@<sha>)을 갱신하고 배포
+cd ../gomdori-mcp && fly deploy -c fly.production.toml
+curl https://mcp.gomdori.app/healthz            # 5종 프로세스 상태
+curl https://mcp.gomdori.app/archhub/health     # 버전·키 만료 D-day·호출수
+```
+
+> 핀 SHA를 안 바꾸면 푸시해도 옛 코드가 그대로 서빙된다(Docker 레이어 캐시).
+
+직접 띄우려면 저장소의 `fly.toml`로 단독 앱을 만들 수도 있다:
 
 ```bash
 fly launch --no-deploy                              # fly.toml 인식
 fly secrets set ARCHHUB_SERVICE_KEY="<디코딩 키>"   # 인증키 주입 (평문 커밋 금지)
 fly secrets set ARCHHUB_DAILY_CALL_CAP=9000         # (선택) 일일 호출 상한 — 초과 시 차단
 fly deploy
-fly scale count 1                                   # streamable-http 세션 일관성 위해 단일 머신
+fly scale count 1                                   # 일일 호출 캡 카운터가 프로세스 로컬 → 단일 머신
 ```
 
-`auto_stop_machines=suspend` + `min_machines_running=0`로 무요청 시 비용 절감, 요청 오면 자동 기동. streamable-http는 세션 기반이라 **단일 머신으로 운영**한다(여러 머신이면 세션이 머신 간에 깨진다). `/health`는 버전·키 적재 여부·**만료 D-day**·오늘/누적 호출수·일일 상한을 노출한다.
+http 전송은 **stateless**라 `Mcp-Session-Id` 없이 붙는 클라이언트도 그대로 동작한다(대신 GET `/mcp` SSE 스트림은 막히고 POST/DELETE만 허용 — 조회 전용 서버라 영향 없음). 다만 일일 호출 캡 카운터가 프로세스 메모리에 있어 **단일 머신으로 운영**한다. `/health`는 버전·키 적재 여부·**만료 D-day**·오늘/누적 호출수·일일 상한을 노출한다.
+
+> **버전 표기 주의** — 이 패키지의 버전은 `/health`의 `version`(= `0.4.0`)이다. MCP `initialize` 응답의 `serverInfo.version`은 생성자에 `version=`을 주지 않아 **FastMCP 라이브러리 버전**이 그대로 나오므로, 둘이 달라 보여도 정상이다.
 
 ---
 
