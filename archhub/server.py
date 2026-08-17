@@ -152,6 +152,9 @@ mcp = FastMCP(
         "데이터는 모두 공식 API 실측값이며, 결과가 없으면 추측하지 말고 '데이터 없음'을 보고한다."
     ),
     auth=_build_auth(),
+    # version 을 넘기지 않으면 FastMCP 가 자기 라이브러리 버전으로 serverInfo 를 채운다
+    # — 클라이언트에 3.4.x 가 이 서버 버전으로 표시된다.
+    version=__version__,
 )
 
 
