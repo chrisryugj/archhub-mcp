@@ -3,6 +3,12 @@
 # PublicDataReader 기본개요 컬럼 swap은 formatting._permit_kind가 자가 보정하므로
 # swap 의존은 없지만, 운영 재현성을 위해 검증된 버전으로 핀 유지.
 # (pyproject.toml은 라이브러리 메타라 하한 범위를 유지 — 역할 분리)
+#
+# ⚠️ 이 핀은 **이 레포의 Dockerfile로 빌드할 때만** 적용된다. 프로덕션인 통합 호스트
+# (gomdori-mcp)는 `pip install git+https://.../archhub-mcp.git@<SHA>` 로 설치해서
+# pyproject의 하한 범위(fastmcp>=3.0)를 타므로 최신 fastmcp가 들어간다
+# (2026-08-17 실측: 운영 3.4.7). 운영과 같은 조합을 재현하려면 여기 핀이 아니라
+# 그때 운영에 깔린 버전을 확인할 것.
 fastmcp==3.3.1
 PublicDataReader==1.1.1.post2
 pandas==2.2.3
