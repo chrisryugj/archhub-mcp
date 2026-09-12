@@ -422,6 +422,8 @@ claude mcp add archhub -e ARCHHUB_SERVICE_KEY=<디코딩 키> -- archhub-mcp
 ```bash
 pip install -e ".[dev]"   # 먼저 설치(안 하면 bare `pytest`는 ModuleNotFoundError)
 pytest tests/             # 외부 API 비의존(네트워크 mock) · 115 케이스
+# Docker 와 같은 고정 조합으로 재현하려면: pip install -r requirements.txt && pip install --no-deps PublicDataReader==1.1.1.post2
+# (PublicDataReader 가 취약한 requests==2.32.3 을 하드핀해서 --no-deps 로 우회, 사유는 requirements.txt 머리말)
 ```
 
 변경 이력은 [CHANGELOG.md](CHANGELOG.md) 참고.

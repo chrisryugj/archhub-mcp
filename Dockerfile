@@ -5,7 +5,8 @@ WORKDIR /app
 
 # 의존성 먼저 설치 (레이어 캐시)
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt \
+    && pip install --no-cache-dir --no-deps PublicDataReader==1.1.1.post2
 
 # 앱 소스
 COPY archhub ./archhub
