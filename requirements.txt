@@ -14,9 +14,13 @@
 # PYSEC-2026-1872·2275 취약. 그래서 PublicDataReader 는 이 파일에 넣지 않고
 # `pip install --no-deps PublicDataReader==1.1.1.post2` 로 따로 설치하며(Dockerfile 참조),
 # 그 의존성(pandas·xmltodict·beautifulsoup4)은 여기 직접 핀.
+#
+# anyio 는 fastmcp·mcp·starlette·httpx 의 전이 의존성. OSV-Scanner 는 이 파일을 자체 해석해
+# 4.9.0(GHSA-82r6-8w77-94w6·GHSA-5p39-cfhj-2xmp, 4.14.2 에서 수정)을 잡으므로 직접 핀.
 fastmcp==3.3.1
 pandas==2.2.3
 requests==2.34.2
 idna==3.19
 xmltodict==0.14.2
 beautifulsoup4==4.13.3
+anyio==4.15.1
