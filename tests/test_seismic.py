@@ -64,8 +64,16 @@ def test_seismic_status_unknown_inputs():
     assert seismic_status("", 5, 1000)[0] == "판정 불가"          # 승인일 미상
     assert seismic_status("abc", 5, 1000)[0] == "판정 불가"
     assert seismic_status("20200101", "", "")[0] == "판정 불가"   # 층수·연면적 모두 미상
-    # 연도만 있어도(YYYY) 판정 가능 — 1월 1일로 간주
+    # 연도만 있어도(YYYY) 판정 가능 — 1월 1일로 간주 (원값은 'YYYY    ' 공백 패딩, 실측)
     assert seismic_status("1980", 10, 9999)[0] == "미적용 추정"
+    assert seismic_status("1980    ", 10, 9999)[0] == "미적용 추정"
+
+
+def test_seismic_status_invalid_approval_date():
+    # '0930'(→930년)·'17250300'(→1725년) 입력 오류를 '1988 이전 승인 → 미적용 추정'으로 오판하지 않는다 (이슈 #3)
+    assert seismic_status("0930    ", 5, 1000) == ("판정 불가", "사용승인일 이상값")
+    assert seismic_status("17250300", 5, 1000) == ("판정 불가", "사용승인일 이상값")
+    assert seismic_status("", 5, 1000) == ("판정 불가", "사용승인일 미상")  # 빈값과 구분
 
 
 def test_vulnerable_struct_keywords():
@@ -122,6 +130,19 @@ def test_seismic_to_text_disclaimer():
     out = seismic_to_text(_seismic_df(), total=4)
     assert "구조안전진단" in out
     assert "내진보강 이력은 대장에 미반영" in out
+
+
+def test_seismic_to_text_excludes_invalid_approval_dates():
+    # 이상값 승인일은 판정 불가로 세고 1988 이전 집계·점검 후보 목록에 넣지 않는다 (이슈 #3)
+    df = pd.concat([_seismic_df(), pd.DataFrame([
+        {"대지위치": "자양동 5-5", "건물명": "오기빌", "구조코드명": "조적조",
+         "주용도코드명": "단독주택", "사용승인일": "0930    ", "지상층수": "4", "연면적": "90"},
+    ])], ignore_index=True)
+    out = seismic_to_text(df, total=5, min_floors=3, max_buildings=30)
+    assert "판정 불가 2건" in out
+    assert "승인일 이상값 1건 제외" in out
+    assert "1988년 의무화 이전 승인 1건" in out   # 0930이 1988 이전 승인으로 새지 않음
+    assert "오기빌" not in out
 
 
 def test_seismic_to_text_truncation():

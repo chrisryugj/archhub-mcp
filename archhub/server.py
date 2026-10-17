@@ -24,7 +24,7 @@ from .formatting import (
     df_to_text, profile_to_text, district_to_text, floors_to_text,
     price_history_to_text, demolitions_to_text, pipeline_to_text, seismic_to_text,
     parcel_history_to_text, temp_buildings_to_text,
-    _date, _age_years, _num,
+    _date, _age_years, _approval_date, _num,
 )
 
 
@@ -355,21 +355,24 @@ def old_buildings(
 
     d = df.copy()
     d[col] = d[col].astype(str).str.strip()
-    d["경과연수"] = pd.to_numeric(d[col].map(_age_years), errors="coerce")  # 월·일 반영 만 경과연수
-    unknown = int(d["경과연수"].isna().sum())  # 사용승인일 미상/파싱불가 → 노후 판정 불가로 제외됨
+    state = d[col].map(lambda v: _approval_date(v)[0])
+    unknown = int((state == "missing").sum())  # 사용승인일 빈값 → 노후 판정 불가로 제외됨
+    invalid = int((state == "invalid").sum())  # '0930'·'17250300' 같은 입력 오류 → 정렬에서 제외 (이슈 #3)
+    d["경과연수"] = pd.to_numeric(d[col].map(_age_years), errors="coerce")  # 월·일 반영 만 경과연수(미상·이상값은 NaN)
     d = d.dropna(subset=["경과연수"])
     d["경과연수"] = d["경과연수"].astype(int)
     old = d[d["경과연수"] >= min_age_years].sort_values("경과연수", ascending=False)
+    excluded_note = f" · 승인일 미상 {unknown}건 제외" if unknown else ""
+    excluded_note += f" · 승인일 이상값 {invalid}건 제외" if invalid else ""
     if len(old) == 0:
-        return not_found(f"경과 {min_age_years}년 이상 건축물 없음 (표제부 전체 {total}건)")
+        return not_found(f"경과 {min_age_years}년 이상 건축물 없음 (표제부 전체 {total}건{excluded_note})")
 
     candidate = ["건물명", "도로명대지위치", "대지위치", "주용도코드명",
                  "사용승인일", "경과연수", "연면적", "지상층수", "세대수"]
     cols = [c for c in candidate if c in old.columns]
     out = old[cols].copy()
     out["사용승인일"] = out["사용승인일"].map(lambda v: _date(v) or v)  # YYYYMMDD → YYYY-MM-DD
-    unknown_note = f" · 승인일 미상 {unknown}건 제외" if unknown else ""
-    note = f"표제부 {total}건{trunc} 중 경과 {min_age_years}년↑ {len(old)}건 (경과연수 내림차순){unknown_note}"
+    note = f"표제부 {total}건{trunc} 중 경과 {min_age_years}년↑ {len(old)}건 (경과연수 내림차순){excluded_note}"
     return df_to_text(out, max_rows=top, note=note)
 
 

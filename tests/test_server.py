@@ -188,6 +188,32 @@ def test_building_data_routes_kind_to_query(monkeypatch):
     assert "테스트빌" in out and "유형=동별개요" in out
 
 
+# ---- old_buildings 사용승인일 이상값 (이슈 #3) ----
+
+def test_old_buildings_excludes_invalid_approval_dates(monkeypatch):
+    # 전주 효자동1가 실측 원값 '0930    '·'17250300'이 경과 1096·301년으로 1·2위를 먹던 버그
+    yr = datetime.date.today().year
+    df = pd.DataFrame([
+        {"대지위치": "효자동1가 568-15번지", "사용승인일": "0930    "},
+        {"대지위치": "효자동1가 439번지", "사용승인일": "17250300"},
+        {"대지위치": "효자동1가 356번지", "사용승인일": "1930    "},
+        {"대지위치": "효자동1가 1-1번지", "사용승인일": f"{yr - 45}0101"},
+        {"대지위치": "효자동1가 2-2번지", "사용승인일": " "},
+    ])
+    monkeypatch.setattr(server.client, "query", lambda *a, **k: (df, len(df)))
+    out = server.old_buildings("52111", "14000", min_age_years=40, top=2)
+    assert "568-15" not in out and "439번지" not in out and "1096" not in out
+    assert out.index("356번지") < out.index("1-1번지")    # 1930 승인이 1위
+    assert "승인일 미상 1건 제외" in out and "승인일 이상값 2건 제외" in out
+
+
+def test_old_buildings_not_found_reports_excluded_invalid(monkeypatch):
+    df = pd.DataFrame([{"대지위치": "효자동1가 568-15번지", "사용승인일": "0930    "}])
+    monkeypatch.setattr(server.client, "query", lambda *a, **k: (df, len(df)))
+    out = server.old_buildings("52111", "14000", min_age_years=40)
+    assert "[NOT_FOUND]" in out and "승인일 이상값 1건 제외" in out
+
+
 # ---- permits_pipeline 기본 since_year ----
 
 def test_permits_pipeline_defaults_to_recent_5_years(monkeypatch):

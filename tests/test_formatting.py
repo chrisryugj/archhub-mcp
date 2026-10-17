@@ -4,6 +4,7 @@ import pandas as pd
 
 from archhub.formatting import (
     _num, _g, _date, _area, _eok, _year_of, _pct, _floor_sort_key, _sample_trend,
+    _approval_date, _age_years,
     _permit_kind, _prune_columns, building_card, profile_to_text, district_to_text,
     floors_to_text, price_history_to_text, demolitions_to_text, pipeline_to_text,
     parcel_history_to_text, temp_buildings_to_text, df_to_text, SOURCE,
@@ -42,6 +43,37 @@ def test_area_format():
     assert _area("0") is None
 
 
+def test_approval_date_states():
+    # 사용승인일 검증 — 정상(ok)·빈값(missing)·이상값(invalid) 3분류 (이슈 #3)
+    today = datetime.date(2026, 10, 18)
+
+    def chk(v):
+        return _approval_date(v, today)
+
+    assert chk("19810204") == ("ok", datetime.date(1981, 2, 4))
+    assert chk("1963    ") == ("ok", datetime.date(1963, 1, 1))   # 연도만 + 공백 패딩(실측 원값)
+    assert chk("198503") == ("ok", datetime.date(1985, 3, 1))
+    assert chk("19850300") == ("ok", datetime.date(1985, 3, 1))   # 일 '00' = 대장의 미상 표기
+    assert chk("19850000") == ("ok", datetime.date(1985, 1, 1))
+    assert chk("20261018") == ("ok", today)                       # 오늘까지 허용
+    for blank in ("", " ", "nan", None, float("nan")):
+        assert chk(blank) == ("missing", None)
+    for bad in ("0930    ", "17250300", "18991231",              # 1900년 이전(효자동1가 실측 0930·17250300)
+                "19790229", "19822027", "19908007",              # 달력에 없는 날짜(평년 2/29·20월·80월)
+                "20261019", "2099",                              # 미래
+                "1985-03-01", "abc", "1985030", "１９８５"):       # 숫자 형식 아님·길이·전각
+        assert chk(bad) == ("invalid", None), bad
+
+
+def test_age_years_drops_invalid_approval_dates():
+    today = datetime.date(2026, 6, 2)
+    assert _age_years("19961231", today) == 29     # 월·일 반영 만 경과연수
+    assert _age_years("1963    ", today) == 63
+    assert _age_years("0930    ", today) is None   # 기존엔 1096년으로 노후 1위 (이슈 #3)
+    assert _age_years("17250300", today) is None   # 기존엔 301년
+    assert _age_years(" ", today) is None
+
+
 def test_building_card_computes_bcr_far_when_missing():
     row = pd.Series({
         "건물명": "테스트빌", "대지면적": "1000", "건축면적": "600",
@@ -76,6 +108,13 @@ def test_building_card_fallback_name():
     assert "■ (건물명 없음)" in building_card(pd.Series({"대지위치": "x"}))
 
 
+def test_building_card_flags_invalid_approval_date():
+    # 17250300 → '1725-03-00'을 실제 승인일처럼 내보이지 않고 원값과 함께 이상값 표기 (이슈 #3)
+    card = building_card(pd.Series({"건물명": "A", "사용승인일": "17250300"}))
+    assert "사용승인일 이상값(원값 17250300)" in card
+    assert "1725-03-00" not in card
+
+
 def test_profile_to_text_truncation_note():
     df = pd.DataFrame([{"건물명": f"동{i}"} for i in range(10)])
     out = profile_to_text(df, total=10, max_buildings=3)
@@ -108,6 +147,24 @@ def test_district_to_text_aggregates():
     assert "40년 이상" in out and "⚠" in out    # 노후 마킹
     assert "→ 경과 30년↑ 합계 2동" in out       # 45년·35년 두 동
     assert SOURCE in out
+
+
+def test_district_to_text_excludes_invalid_approval_dates():
+    # '0930'·'17250300' 입력 오류가 930s·1720s 연대, 평균 경과(1096·301년)로 새지 않는다 (이슈 #3)
+    yr = datetime.date.today().year
+    df = pd.DataFrame([
+        {"주용도코드명": "단독주택", "사용승인일": f"{yr - 40}0101"},
+        {"주용도코드명": "단독주택", "사용승인일": f"{yr - 20}0101"},
+        {"주용도코드명": "단독주택", "사용승인일": "0930    "},
+        {"주용도코드명": "단독주택", "사용승인일": "17250300"},
+        {"주용도코드명": "단독주택", "사용승인일": " "},
+    ])
+    out = district_to_text(df, total=5, min_age_years=30)
+    assert "평균 경과 30년" in out                        # (40+20)/2 — 이상값 미포함
+    assert "승인일 이상값 2건 제외" in out
+    assert not any(ln.strip().startswith(("930s", "1720s")) for ln in out.splitlines())
+    assert out.count("(이상값)") == 2 and out.count("(미상)") == 2   # 연대별·노후도 양쪽, 빈값과 분리
+    assert "→ 경과 30년↑ 합계 1동" in out
 
 
 def test_district_to_text_handles_empty_optional_columns():

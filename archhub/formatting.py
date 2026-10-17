@@ -42,20 +42,46 @@ def _date(v) -> Optional[str]:
     return None
 
 
+# 사용승인일 하한. 대장 원값에 '0930'(→930년)·'17250300'(→1725년) 같은 입력 오류가 섞여 있어
+# 그대로 경과연수를 계산하면 1096년·301년이 노후 1위를 차지한다(이슈 #3, 전주 효자동1가 실측).
+APPROVAL_MIN_YEAR = 1900
+
+
+def _approval_date(v, today: Optional[datetime.date] = None) -> tuple[str, Optional[datetime.date]]:
+    """사용승인일 원값 검증 → (상태, 날짜). 상태: "ok" | "missing"(빈값) | "invalid"(이상값).
+
+    정상 형식은 YYYYMMDD·YYYYMM·연도만(YYYY — 실측상 'YYYY    '처럼 공백 패딩, 오래된 건물에 흔함).
+    월·일 '00'은 대장의 미상 표기라 1로 간주한다. 숫자 형식이 아니거나, 달력에 없는 날짜
+    (13월·평년 2월 29일 등)이거나, APPROVAL_MIN_YEAR 이전이거나, 오늘 이후면 입력 오류로 보고
+    "invalid" — 경과연수·연대·내진 판정에서 빼고 빈값("missing")과 따로 센다.
+    """
+    s = str(v).strip()
+    if not s or s.lower() in ("nan", "none"):
+        return "missing", None
+    if not (s.isascii() and s.isdigit() and len(s) in (4, 6, 8)):
+        return "invalid", None
+    y, m, d = int(s[:4]), int(s[4:6] or 0), int(s[6:8] or 0)
+    if y < APPROVAL_MIN_YEAR:
+        return "invalid", None
+    try:
+        date = datetime.date(y, m or 1, (d or 1) if m else 1)
+    except ValueError:
+        return "invalid", None
+    if date > (today or datetime.date.today()):
+        return "invalid", None
+    return "ok", date
+
+
 def _age_years(v, today: Optional[datetime.date] = None) -> Optional[int]:
-    """사용승인일(YYYYMMDD 등) → 오늘 기준 만 경과연수. 파싱불가면 None.
+    """사용승인일(YYYYMMDD 등) → 오늘 기준 만 경과연수. 미상·이상값(_approval_date)이면 None.
 
     연도만 빼는 게 아니라 월·일까지 반영한다(승인일이 아직 안 지난 해는 1년 차감).
     예: 1996-12-31 승인 → 2026-06-02 기준 29년(아직 만 30년 아님)."""
-    s = str(v).strip()
-    if len(s) < 4 or not s[:4].isdigit():
-        return None
     today = today or datetime.date.today()
-    y = int(s[:4])
-    m = int(s[4:6]) if len(s) >= 6 and s[4:6].isdigit() and 1 <= int(s[4:6]) <= 12 else 1
-    d = int(s[6:8]) if len(s) >= 8 and s[6:8].isdigit() and 1 <= int(s[6:8]) <= 31 else 1
-    age = today.year - y - ((today.month, today.day) < (m, d))
-    return age if age >= 0 else None
+    state, d = _approval_date(v, today)
+    if state != "ok":
+        return None
+    return today.year - d.year - ((today.month, today.day) < (d.month, d.day))
 
 
 def _area(v) -> Optional[str]:
@@ -137,12 +163,17 @@ def building_card(row: pd.Series) -> str:
     if self_p or mech_p:
         lines.append(f"  주차: 자주식 {self_p:g}대 · 기계식 {mech_p:g}대")
 
-    appr = _date(row.get("사용승인일"))
+    appr_raw = row.get("사용승인일")
+    appr_state, _ = _approval_date(appr_raw)
+    appr = _date(appr_raw) if appr_state == "ok" else None
     perm = _date(row.get("허가일"))
     start = _date(row.get("착공일"))
     times = []
     if appr:
         times.append(f"사용승인 {appr}")
+    elif appr_state == "invalid":
+        # 입력 오류(17250300 → '1725-03-00')를 실제 승인일처럼 보이지 않게 원값과 함께 표시 (이슈 #3)
+        times.append(f"사용승인일 이상값(원값 {str(appr_raw).strip()})")
     if perm:
         times.append(f"허가 {perm}")
     if start:
@@ -207,9 +238,13 @@ def district_to_text(
         errors="coerce",
     )
     floors = pd.to_numeric(df.get("지상층수", pd.Series(dtype="object")), errors="coerce")
-    appr = df.get("사용승인일", pd.Series(dtype="object")).astype(str).str.strip()
-    year = pd.to_numeric(appr.str[:4].where(appr.str.len() >= 4), errors="coerce")
+    appr = df.get("사용승인일", pd.Series(dtype="object"))
+    # 이상값(입력 오류 — _approval_date)은 미상과 따로 세고 평균·연대·노후도 집계에서 뺀다 (이슈 #3)
+    checked = appr.map(_approval_date)
+    state = checked.map(lambda t: t[0])
+    year = pd.to_numeric(checked.map(lambda t: t[1].year if t[1] else None), errors="coerce")
     age = pd.to_numeric(appr.map(_age_years), errors="coerce")  # 월·일 반영 만 경과연수
+    n_missing, n_invalid = int((state == "missing").sum()), int((state == "invalid").sum())
 
     lines = [f"[법정동 건축물 통계] 표제부 {total}건{trunc} 기준", ""]
 
@@ -223,6 +258,8 @@ def district_to_text(
         summary.append(f"평균 경과 {age.mean():.0f}년")
     lines.append("■ 총괄")
     lines.append("  " + " · ".join(summary))
+    if n_invalid:
+        lines.append(f"  승인일 이상값 {n_invalid:,}건 제외 — 평균 경과·연대·노후도 집계에서 뺌(입력 오류 추정)")
 
     # 주용도별 (동수 상위)
     use = df.get("주용도코드명")
@@ -267,9 +304,10 @@ def district_to_text(
         for dec in sorted(decade.unique()):
             cnt = int((decade == dec).sum())
             lines.append(f"  {dec}s   {cnt:>6,}동 ({_pct(cnt, n)})")
-        unknown = int(year.isna().sum())
-        if unknown:
-            lines.append(f"  (미상) {unknown:>6,}동 ({_pct(unknown, n)})")
+        if n_missing:
+            lines.append(f"  (미상) {n_missing:>6,}동 ({_pct(n_missing, n)})")
+        if n_invalid:
+            lines.append(f"  (이상값) {n_invalid:>4,}동 ({_pct(n_invalid, n)})")
 
     # 노후도 분포
     if age.notna().any():
@@ -281,9 +319,10 @@ def district_to_text(
             cnt = int(((age >= lo) & (age < hi)).sum())
             mark = "  ⚠" if lo >= min_age_years else ""
             lines.append(f"  {lab:<8} {cnt:>6,}동 ({_pct(cnt, n)}){mark}")
-        unknown = int(age.isna().sum())
-        if unknown:
-            lines.append(f"  (미상)   {unknown:>6,}동 ({_pct(unknown, n)})")
+        if n_missing:
+            lines.append(f"  (미상)   {n_missing:>6,}동 ({_pct(n_missing, n)})")
+        if n_invalid:
+            lines.append(f"  (이상값) {n_invalid:>6,}동 ({_pct(n_invalid, n)})")
         aged = int((age >= min_age_years).sum())
         lines.append(f"  → 경과 {min_age_years}년↑ 합계 {aged:,}동 ({_pct(aged, n)})")
 
@@ -854,6 +893,7 @@ SEISMIC_RULES = [
     (20171201, 2, 200, "2017.12(2층↑·목구조 3층↑ 또는 200㎡↑ + 모든 주택)"),
 ]
 SEISMIC_PRE_1988 = "1988년 내진설계 의무화 이전 승인"
+SEISMIC_BAD_DATE = "사용승인일 이상값"
 
 # 지진에 취약한 구조 키워드(구조코드명 부분일치) — 우선 점검 정렬에 사용
 SEISMIC_VULNERABLE_STRUCTS = ("조적", "벽돌", "블록", "블럭", "석조", "흙")
@@ -881,11 +921,15 @@ def seismic_status(approval, floors, gfa, struct: str = "", use: str = "") -> tu
     Returns:
         (판정, 근거) — 판정 ∈ {"의무 적용 추정", "미적용 추정", "판정 불가"}.
     """
-    s = str(approval).strip()
-    if len(s) < 4 or not s[:4].isdigit():
+    state, _ = _approval_date(approval)
+    if state == "missing":
         return "판정 불가", "사용승인일 미상"
+    if state == "invalid":
+        # '0930'·'17250300' 같은 입력 오류를 '1988 이전 승인'(미적용 추정)으로 오판하지 않게 (이슈 #3)
+        return "판정 불가", SEISMIC_BAD_DATE
+    s = str(approval).strip()
     # YYYYMMDD 비교키 (월·일 없으면 1월 1일로 간주)
-    key = int(s[:8]) if len(s) >= 8 and s[:8].isdigit() else int(s[:4]) * 10000 + 101
+    key = int(s[:8]) if len(s) >= 8 else int(s[:4]) * 10000 + 101
 
     rule = None
     for eff, min_floors, min_area, label in SEISMIC_RULES:
@@ -921,6 +965,7 @@ def seismic_to_text(
     n = len(df)
     counts = {"의무 적용 추정": 0, "미적용 추정": 0, "판정 불가": 0}
     pre1988 = 0
+    bad_date = 0
     unapplied: list[tuple[bool, float, pd.Series, str]] = []  # (취약구조, 층수, 행, 근거)
     for _, row in df.iterrows():
         struct = _g(row, "구조코드명") or ""
@@ -929,6 +974,8 @@ def seismic_to_text(
             struct=struct, use=_g(row, "주용도코드명") or "",
         )
         counts[status] += 1
+        if basis == SEISMIC_BAD_DATE:
+            bad_date += 1
         if status != "미적용 추정":
             continue
         if basis == SEISMIC_PRE_1988:
@@ -944,6 +991,8 @@ def seismic_to_text(
     )
     if pre1988:
         lines.append(f"└ 미적용 추정 중 1988년 의무화 이전 승인 {pre1988:,}건")
+    if bad_date:
+        lines.append(f"└ 판정 불가 중 승인일 이상값 {bad_date:,}건 제외(입력 오류 추정 — 판정·목록에서 뺌)")
     lines.append("")
 
     unapplied.sort(key=lambda t: (t[0], t[1]), reverse=True)  # 취약구조 우선 → 고층 순
