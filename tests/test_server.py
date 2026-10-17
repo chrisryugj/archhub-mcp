@@ -82,6 +82,32 @@ def test_find_region_bunji_only_is_not_found(monkeypatch):
     assert "[NOT_FOUND]" in out and "지역 키워드" in out
 
 
+# ---- 행정구역 개편 지역 (이슈 #2) ----
+
+def test_find_region_notes_reorganized_codes(monkeypatch):
+    from archhub.client import _apply_reorg
+    monkeypatch.setattr(server.client, "_bdong", _apply_reorg(pd.DataFrame([
+        {"시도명": "전라남도", "시군구명": "순천시", "읍면동명": "연향동", "동리명": "",
+         "법정동코드": "4615011400"},
+    ])))
+    out = server.find_region("전라남도 순천시 연향동")
+    assert "12150" in out and "11400" in out and "46150" not in out
+    assert "종전 29xxx·46xxx 코드는 건축HUB에서 0건" in out
+    _patch_bdong(monkeypatch)
+    assert "종전" not in server.find_region("광진구 자양동")   # 개편 무관 지역엔 안내 없음
+
+
+def test_not_found_hints_reorganized_region_codes(monkeypatch):
+    # 종전 코드로 조회해 0건이면 재시도 제안 맨 앞에 새 코드 안내 (이슈 #2 재현 입력)
+    monkeypatch.setattr(server.client, "query", lambda *a, **k: (pd.DataFrame(), 0))
+    out = server.district_stats("46150", "13300")   # 순천 조례동
+    assert "[NOT_FOUND]" in out and "새 시군구코드 12150" in out and "전남광주통합특별시" in out
+    assert "새 시군구코드 12240" in server.old_buildings("29140", "12000")   # 광주 서구 치평동
+    assert "제물포구" in server.building_data("ledger", "표제부", "28110", "10100")   # 인천 중구(폐지)
+    assert "분구" in server.parcel_history("41590", "25321", bun="1")             # 화성시
+    assert "개편" not in server.district_stats("11215", "10500")                 # 무관 지역
+
+
 # ---- parcel_history / temp_buildings 도구 ----
 
 def _route_query(responses):

@@ -84,6 +84,33 @@ BDONG_CACHE_PATH = Path(
 ) / "code_bdong.json"
 BDONG_FETCH_TIMEOUT = 30
 
+# 2026-07-01 전남광주통합특별시 출범 — 광주광역시(29)·전라남도(46) 시군구코드가 12xxx로 다시
+# 매겨졌다. 위 법정동 JSON(2024-08-01 기준, 2024-08 이후 갱신 없음)은 종전 코드를 주는데 건축HUB는
+# 새 코드로만 응답한다(이슈 #2 실측: 순천 연향동 46150/11400 → 0건, 12150/11400 → 2,234건,
+# 대지위치 '전남광주통합특별시 순천시 연향동'). 뒤 5자리(읍면동·리)는 그대로다(동 4곳·리 2곳 실측).
+# 시군구 대응은 schoolinfo-mcp regions.json·realestate-mcp lawd-codes.js 와 27개 모두 일치.
+# 시도 행(29000·46000)은 하나의 시도(12000)로 합친다.
+REORG_SIDO_NAME = "전남광주통합특별시"
+REORG_SIGUNGU = {
+    "29000": "12000", "46000": "12000",
+    "29110": "12210", "29140": "12240", "29155": "12270", "29170": "12300", "29200": "12330",  # 광주 동·서·남·북·광산구
+    "46110": "12110", "46130": "12130", "46150": "12150", "46170": "12170", "46230": "12190",  # 목포·여수·순천·나주·광양
+    "46710": "12710", "46720": "12720", "46730": "12730", "46770": "12740", "46780": "12750",  # 담양·곡성·구례·고흥·보성
+    "46790": "12760", "46800": "12770", "46810": "12780", "46820": "12790", "46830": "12800",  # 화순·장흥·강진·해남·영암
+    "46840": "12810", "46860": "12820", "46870": "12830", "46880": "12840", "46890": "12850",  # 무안·함평·영광·장성·완도
+    "46900": "12860", "46910": "12870",                                                      # 진도·신안
+}
+
+# 같은 2026 개편으로 폐지·분구됐지만 새 법정동코드(읍면동 뒤 5자리 포함)를 확인하지 못해 테이블을
+# 바꾸지 않은 시군구. 종전 코드는 건축HUB가 0건을 준다(인천 중구 중앙동1가·서구 검암동·화성 봉담읍
+# 상리 실측). 새 구에선 뒤 5자리도 바뀌어(제물포구 10100 = 만석동) 기계적으로 옮길 수 없다.
+REORG_UNMAPPED = {
+    "28110": "인천 중구(2026-07-01 폐지 → 제물포구·영종구)",
+    "28140": "인천 동구(2026-07-01 폐지 → 제물포구)",
+    "28260": "인천 서구(2026-07-01 폐지 → 서해구·검단구)",
+    "41590": "화성시(2026-02-01 만세구·효행구·병점구·동탄구로 분구)",
+}
+
 
 class _TTLCache:
     """in-memory TTL+LRU 캐시 (표준 라이브러리만 — OrderedDict 기반, 신규 의존성 금지).
@@ -117,6 +144,23 @@ class _TTLCache:
             self._d.move_to_end(key)
             while len(self._d) > self.maxsize:
                 self._d.popitem(last=False)
+
+
+def _apply_reorg(df: pd.DataFrame) -> pd.DataFrame:
+    """종전 광주·전남 법정동 행을 전남광주통합특별시 새 코드로 바꾼다(REORG_SIGUNGU 참조).
+
+    법정동코드 앞 5자리만 새 시군구코드로 바꾸고 뒤 5자리는 유지한다. 종전 시도명은 '구시도명'
+    컬럼에 남겨 "전라남도 순천시"·"광주광역시 서구" 같은 옛 이름 검색도 맞게 한다."""
+    code = df["법정동코드"].astype(str)
+    old_sgg = code.str[:5]
+    hit = old_sgg.isin(list(REORG_SIGUNGU))
+    if not hit.any():
+        return df
+    df = df.assign(구시도명="")
+    df.loc[hit, "구시도명"] = df.loc[hit, "시도명"]
+    df.loc[hit, "시도명"] = REORG_SIDO_NAME
+    df.loc[hit, "법정동코드"] = old_sgg[hit].map(REORG_SIGUNGU) + code[hit].str[5:]
+    return df[~(hit & df.duplicated(subset="법정동코드"))]  # 시도 행 2개(29·46) → 1200000000 하나
 
 
 def _validate_codes(sigungu_code, bdong_code) -> None:
@@ -158,12 +202,12 @@ class ArchHubClient:
     # ---- 지역코드 ----
 
     def bdong_table(self) -> pd.DataFrame:
-        """법정동코드 테이블(현행만) 1회 로드 후 캐시."""
+        """법정동코드 테이블(현행만) 1회 로드 후 캐시. 전남광주통합특별시 새 코드를 덧씌운다."""
         if self._bdong is None:
             raw = self._load_bdong_json()
             df = pd.DataFrame(raw["data"]).fillna("")
             df = df[df["말소일자"].astype(str).str.strip() == ""].copy()
-            self._bdong = df
+            self._bdong = _apply_reorg(df)
         return self._bdong
 
     def _load_bdong_json(self) -> dict:
@@ -201,7 +245,8 @@ class ArchHubClient:
             df["시도명"].astype(str) + " "
             + df["시군구명"].astype(str) + " "
             + df["읍면동명"].astype(str) + " "
-            + df["동리명"].astype(str)
+            + df["동리명"].astype(str) + " "
+            + df.get("구시도명", "")  # 개편 전 시도명(전라남도·광주광역시)으로도 찾게 (이슈 #2)
         )
         mask = pd.Series([True] * len(df), index=df.index)
         for term in keyword.split():

@@ -66,6 +66,49 @@ def test_find_region_regex_special_chars_no_crash():
     assert len(c.find_region("자양동")) == 1    # 정상 검색은 그대로
 
 
+# ---- 전남광주통합특별시 코드 덧씌우기 (이슈 #2) ----
+
+def _reorg_client(monkeypatch):
+    """원본 법정동 JSON(열 지향, 2024-08 기준 종전 코드)을 합성해 bdong_table()의 덧씌우기를 탄다."""
+    rows = [
+        ("서울특별시", "광진구", "자양동", "", "1121510500"),
+        ("광주광역시", "", "", "", "2900000000"),
+        ("광주광역시", "서구", "치평동", "", "2914012000"),
+        ("전라남도", "", "", "", "4600000000"),
+        ("전라남도", "순천시", "연향동", "", "4615011400"),
+        ("전라남도", "고흥군", "고흥읍", "고소리", "4677025021"),
+    ]
+    cols = ["시도명", "시군구명", "읍면동명", "동리명", "법정동코드"]
+    data = {c: {str(i): r[j] for i, r in enumerate(rows)} for j, c in enumerate(cols)}
+    data["말소일자"] = {str(i): None for i in range(len(rows))}
+    c = ArchHubClient("k")
+    monkeypatch.setattr(c, "_load_bdong_json", lambda: {"name": "test", "data": data})
+    return c
+
+
+def test_reorg_returns_codes_archhub_accepts(monkeypatch):
+    # 실측: 순천 연향동 46150/11400 → 0건, 12150/11400 → 2,234건 (대지위치 '전남광주통합특별시 순천시 연향동')
+    c = _reorg_client(monkeypatch)
+    r = c.find_region("순천시 연향동").iloc[0]
+    assert (r["sigungu_code"], r["bdong_code"], r["시도명"]) == ("12150", "11400", "전남광주통합특별시")
+    r = c.find_region("서구 치평동").iloc[0]
+    assert (r["sigungu_code"], r["bdong_code"]) == ("12240", "12000")
+    r = c.find_region("고흥군 고소리").iloc[0]
+    assert (r["sigungu_code"], r["bdong_code"]) == ("12740", "25021")   # 리 단위도 뒤 5자리 유지
+    r = c.find_region("자양동").iloc[0]
+    assert (r["sigungu_code"], r["bdong_code"]) == ("11215", "10500")   # 다른 시도는 그대로
+
+
+def test_reorg_old_and_new_names_both_found(monkeypatch):
+    c = _reorg_client(monkeypatch)
+    for kw in ("전라남도 순천시 연향동", "전남 순천시 연향동", "전남광주통합특별시 순천시 연향동",
+               "광주광역시 서구 치평동", "광주 서구 치평동"):
+        assert len(c.find_region(kw)) == 1, kw
+    assert len(c.find_region("광주광역시 순천시")) == 0   # 옛 시도명이 다른 옛 시도 지역으로 새지 않음
+    # 시도 행 2개(29·46)는 1200000000 하나로 합친다
+    assert (c.find_region("전남광주통합특별시")["법정동코드"] == "1200000000").sum() == 1
+
+
 # ---- 입력검증 ----
 
 def test_query_requires_service_key():
