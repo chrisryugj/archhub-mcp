@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pandas as pd
 from fastmcp import FastMCP
+from fastmcp.exceptions import ToolError
 from starlette.middleware import Middleware
 from starlette.responses import JSONResponse
 
@@ -158,6 +159,16 @@ def _region_hint(sigungu_code) -> list[str]:
     return []
 
 
+def _tool_error(e: Exception, ctx: str) -> ToolError:
+    """도구 실패(외부 API 시간 초과·연결 실패·HTTP/응답 오류, 입력 오류)를 MCP isError=true로 올린다.
+
+    본문은 format_error 그대로([EXTERNAL_API_ERROR] 등 + 키 마스킹). 문자열로 돌려주면 클라이언트가
+    성공 결과로 받는다(gomdori-mcp#4). 정상 0건([NOT_FOUND])은 오류가 아니라 일반 결과로 남긴다.
+    호출측은 `raise ... from None` — 원 예외(requests 메시지엔 serviceKey가 든 URL이 있음)가
+    트레이스백 체인에 실리지 않게 끊는다."""
+    return ToolError(format_error(e, ctx))
+
+
 mcp = FastMCP(
     name="archhub",
     instructions=(
@@ -209,7 +220,7 @@ def find_region(keyword: str, limit: int = 20) -> str:
     try:
         res = client.find_region(" ".join(region_terms))
     except Exception as e:
-        return format_error(e, "find_region")
+        raise _tool_error(e, "find_region") from None
     if len(res) == 0:
         return not_found(f"'{keyword}' 에 해당하는 지역 없음", [
             "시/구/동 이름 일부로 다시 검색",
@@ -241,7 +252,7 @@ def _query(kind: str, ctx: str, type_name, sigungu_code, bdong_code, bun, ji, ma
             bun=bun, ji=ji, num_rows=max_rows, page_no=page,
         )
     except Exception as e:
-        return format_error(e, ctx)
+        raise _tool_error(e, ctx) from None
     if len(df) == 0:
         return not_found(
             f"{ctx} '{type_name}' 결과 없음 (sigungu={sigungu_code}, bdong={bdong_code})",
@@ -329,7 +340,7 @@ def building_profile(
             bun=bun, ji=ji, num_rows=100,
         )
     except Exception as e:
-        return format_error(e, "building_profile")
+        raise _tool_error(e, "building_profile") from None
     if len(df) == 0:
         return not_found(
             f"건축물대장 표제부 없음 (sigungu={sigungu_code}, bdong={bdong_code}, bun={bun}, ji={ji})",
@@ -363,7 +374,7 @@ def old_buildings(
     try:
         df, total = client.query("ledger", "표제부", sigungu_code, bdong_code, fetch_all=True)
     except Exception as e:
-        return format_error(e, "old_buildings")
+        raise _tool_error(e, "old_buildings") from None
     if len(df) == 0:
         return not_found(f"표제부 데이터 없음 (sigungu={sigungu_code}, bdong={bdong_code})",
                          _region_hint(sigungu_code))
@@ -373,7 +384,7 @@ def old_buildings(
 
     col = "사용승인일"
     if col not in df.columns:
-        return format_error(Exception(f"표제부에 '{col}' 컬럼 없음. 실제 컬럼: {list(df.columns)}"), "old_buildings")
+        raise _tool_error(Exception(f"표제부에 '{col}' 컬럼 없음. 실제 컬럼: {list(df.columns)}"), "old_buildings")
 
     d = df.copy()
     d[col] = d[col].astype(str).str.strip()
@@ -421,7 +432,7 @@ def district_stats(
     try:
         df, total = client.query("ledger", "표제부", sigungu_code, bdong_code, fetch_all=True)
     except Exception as e:
-        return format_error(e, "district_stats")
+        raise _tool_error(e, "district_stats") from None
     if len(df) == 0:
         return not_found(
             f"표제부 데이터 없음 (sigungu={sigungu_code}, bdong={bdong_code})",
@@ -464,7 +475,7 @@ def building_floors(
             bun=bun, ji=ji, num_rows=100,
         )
     except Exception as e:
-        return format_error(e, "building_floors")
+        raise _tool_error(e, "building_floors") from None
     if len(df) == 0:
         return not_found(
             f"층별개요 없음 (sigungu={sigungu_code}, bdong={bdong_code}, bun={bun}, ji={ji})",
@@ -507,7 +518,7 @@ def price_history(
             bun=bun, ji=ji, fetch_all=True,
         )
     except Exception as e:
-        return format_error(e, "price_history")
+        raise _tool_error(e, "price_history") from None
     if len(df) == 0:
         return not_found(
             f"주택가격(공시가격) 없음 (sigungu={sigungu_code}, bdong={bdong_code}, bun={bun}, ji={ji})",
@@ -540,7 +551,7 @@ def demolitions(
     try:
         df, total = client.query("permit", "철거멸실관리대장", sigungu_code, bdong_code, fetch_all=True)
     except Exception as e:
-        return format_error(e, "demolitions")
+        raise _tool_error(e, "demolitions") from None
     if len(df) == 0:
         return not_found(
             f"철거멸실 데이터 없음 (sigungu={sigungu_code}, bdong={bdong_code})",
@@ -576,7 +587,7 @@ def permits_pipeline(
     try:
         df, total = client.query("permit", "기본개요", sigungu_code, bdong_code, fetch_all=True)
     except Exception as e:
-        return format_error(e, "permits_pipeline")
+        raise _tool_error(e, "permits_pipeline") from None
     if len(df) == 0:
         return not_found(
             f"건축인허가 기본개요 없음 (sigungu={sigungu_code}, bdong={bdong_code})",
@@ -615,7 +626,7 @@ def seismic_check(
     try:
         df, total = client.query("ledger", "표제부", sigungu_code, bdong_code, fetch_all=True)
     except Exception as e:
-        return format_error(e, "seismic_check")
+        raise _tool_error(e, "seismic_check") from None
     if len(df) == 0:
         return not_found(
             f"표제부 데이터 없음 (sigungu={sigungu_code}, bdong={bdong_code})",
@@ -662,7 +673,7 @@ def parcel_history(
                 bun=bun, ji=ji, num_rows=100,
             )
         except Exception as e:
-            return format_error(e, f"parcel_history({type_name})")
+            raise _tool_error(e, f"parcel_history({type_name})") from None
     if all(len(f) == 0 for f in frames.values()):
         return not_found(
             f"필지 연혁 없음 (sigungu={sigungu_code}, bdong={bdong_code}, bun={bun}, ji={ji})",
@@ -699,7 +710,7 @@ def temp_buildings(
         df, total = client.query("permit", "가설건축물", sigungu_code, bdong_code,
                                  bun=bun, ji=ji, fetch_all=True)
     except Exception as e:
-        return format_error(e, "temp_buildings")
+        raise _tool_error(e, "temp_buildings") from None
     if len(df) == 0:
         return not_found(
             f"가설건축물 데이터 없음 (sigungu={sigungu_code}, bdong={bdong_code})",

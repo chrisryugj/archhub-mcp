@@ -317,7 +317,7 @@ Claude Desktop은 원격 HTTP를 직접 못 붙이므로 `mcp-remote` 어댑터 
 
 > v0.4.0에서 raw 3종(`building_ledger`/`building_permit`/`housing_permit`)을 `building_data` 하나로 통합했다 — 파라미터가 동일하고 대장 종류만 달라, 도구 수를 줄여 LLM의 도구 선택 혼란과 스키마 토큰을 같이 줄였다. 원본 표 출력은 빈 컬럼·코드/코드명 중복·조회인자 에코를 자동 생략(생략 수 명시)해 토큰을 아낀다.
 
-모든 응답은 공식 API 실측값이며 **출처를 명시**한다. 결과가 없으면 `[NOT_FOUND]`, 에러는 `[EXTERNAL_API_ERROR]` 등 머신 파싱 프리픽스 + "LLM은 추측 금지" 경고로 환각을 차단한다.
+모든 응답은 공식 API 실측값이며 **출처를 명시**한다. 결과가 없으면 `[NOT_FOUND]`, 에러는 `[EXTERNAL_API_ERROR]` 등 머신 파싱 프리픽스 + "LLM은 추측 금지" 경고로 환각을 차단한다. 에러(외부 API 시간 초과·연결 실패·HTTP/응답 오류, 입력 오류 `[INVALID_PARAMETER]`)는 MCP 결과에도 `isError: true`로 표시되고, 0건 `[NOT_FOUND]`는 오류가 아닌 일반 결과(`isError: false`)다.
 
 ---
 

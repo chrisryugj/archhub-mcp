@@ -25,7 +25,7 @@ from PublicDataReader import (
     HousingLicense,
 )
 
-from .errors import ArchHubError, NO_KEY, INVALID_PARAM, API_ERROR
+from .errors import ArchHubError, NO_KEY, INVALID_PARAM, API_ERROR, mask_key
 
 # stderr 전용 로거 — stdout은 stdio MCP의 JSON-RPC 스트림이라 절대 오염 금지.
 # 핸들러 설정(basicConfig)은 server.main()에서 1회 수행한다.
@@ -398,7 +398,8 @@ class ArchHubClient:
                 code=API_ERROR,
             )
         except requests.RequestException as e:
-            logger.warning("외부 API 요청 실패: %s (url=%s)", e, url)
+            # requests 예외 메시지엔 serviceKey가 든 요청 URL이 실린다(ConnectionError 실측) — 로그에 키 평문 금지
+            logger.warning("외부 API 요청 실패: %s (url=%s)", mask_key(str(e)), url)
             raise ArchHubError(f"API 요청 실패: {e}", code=API_ERROR)
 
         try:
